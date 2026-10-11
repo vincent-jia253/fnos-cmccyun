@@ -1,0 +1,59 @@
+[
+  {
+    "stepTitle": "移动云盘授权",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "获取授权：电脑浏览器登录 https://yun.139.com 后按 F12 打开开发者工具，在 Network(网络) 面板里任选一个请求，复制请求头中 Authorization 的值（形如 Basic xxxxx，一串 base64 文本）。"
+      },
+      {
+        "type": "password",
+        "field": "wizard_authorization",
+        "label": "Authorization",
+        "initValue": "",
+        "rules": []
+      },
+      {
+        "type": "tips",
+        "helpText": "也可以先留空，安装完成后打开「移动云盘」应用，在管理界面里填写授权并点击挂载。"
+      }
+    ]
+  },
+  {
+    "stepTitle": "挂载设置",
+    "items": [
+      {
+        "type": "text",
+        "field": "wizard_mount_subdir",
+        "label": "挂载目录名（位于应用共享目录内）",
+        "initValue": "移动云盘",
+        "rules": [
+          {
+            "pattern": "^[^/\\\\]{1,64}$",
+            "message": "目录名不能包含 / 或 \\"
+          }
+        ]
+      },
+      {
+        "type": "select",
+        "field": "wizard_readonly",
+        "label": "挂载模式",
+        "initValue": "rw",
+        "options": [
+          {
+            "label": "读写（可上传/删除云盘文件）",
+            "value": "rw"
+          },
+          {
+            "label": "只读（仅浏览与下载）",
+            "value": "ro"
+          }
+        ]
+      },
+      {
+        "type": "tips",
+        "helpText": "挂载完成后，在「文件」应用里打开名为 cmccyun 的共享文件夹即可看到云盘内容。"
+      }
+    ]
+  }
+]

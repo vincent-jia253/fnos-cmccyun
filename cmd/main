@@ -1,0 +1,160 @@
+#!/bin/bash
+# 移动云盘挂载（cmccyun）— 飞牛 fnOS 运行控制脚本
+#   main start   启动服务（挂载 + 管理界面）
+#   main stop    停止服务并清理挂载
+#   main status  0 = 运行中，3 = 未运行
+
+set -u
+
+# 允许手动执行（缺省时从脚本位置推断飞牛 fnOS 注入的路径）
+APP_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+: "${TRIM_APPDEST:=${APP_ROOT}/target}"
+: "${TRIM_PKGETC:=${APP_ROOT}/etc}"
+: "${TRIM_PKGVAR:=${APP_ROOT}/var}"
+: "${TRIM_TEMP_LOGFILE:=/dev/null}"
+export TRIM_APPDEST TRIM_PKGETC TRIM_PKGVAR TRIM_TEMP_LOGFILE
+
+# 载入公共库；安装前置阶段应用文件可能尚未解包，此时退化为内置的最小实现
+CMCCYUN_COMMON=""
+for _p in "${TRIM_APPDEST}/fnos-common.sh" "${APP_ROOT}/app/fnos-common.sh" "${APP_ROOT}/fnos-common.sh"; do
+    if [ -r "${_p}" ]; then CMCCYUN_COMMON="${_p}"; break; fi
+done
+if [ -n "${CMCCYUN_COMMON}" ]; then
+    . "${CMCCYUN_COMMON}"
+else
+    cmccyun_log() { [ -n "${TRIM_TEMP_LOGFILE:-}" ] && [ "${TRIM_TEMP_LOGFILE}" != "/dev/null" ] && echo "[cmccyun] $*" >>"${TRIM_TEMP_LOGFILE}" 2>/dev/null; return 0; }
+    cmccyun_fail() { cmccyun_log "$*"; echo "移动云盘：$*" >&2; }
+fi
+
+BIN="$(cmccyun_bin)"
+
+pid_alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+
+current_pid() {
+    [ -r "${CMCCYUN_PIDFILE}" ] && head -n1 "${CMCCYUN_PIDFILE}" | tr -d '[:space:]'
+}
+
+is_mounted() {
+    local mp="$1"
+    [ -n "${mp}" ] && grep -qsF " ${mp} " /proc/self/mountinfo
+}
+
+start_process() {
+    local pid bg ru i
+    pid="$(current_pid)"
+    if pid_alive "${pid}"; then
+        cmccyun_log "服务已在运行 (pid=${pid})"
+        return 0
+    fi
+    rm -f "${CMCCYUN_PIDFILE}"
+
+    if [ ! -x "${BIN}" ]; then
+        cmccyun_fail "缺少可执行文件 ${BIN}"
+        return 1
+    fi
+
+    mkdir -p "${CMCCYUN_VAR_DIR}" "${CMCCYUN_CFG_DIR}" "${CMCCYUN_STAGE}" 2>/dev/null
+    touch "${CMCCYUN_STDOUT}" "${CMCCYUN_LOG}" 2>/dev/null
+    : >"${CMCCYUN_LOG}"
+
+    ru="$(cmccyun_run_user)"
+    if [ -n "${ru}" ]; then
+        chown -R "${ru}" "${CMCCYUN_VAR_DIR}" "${CMCCYUN_CFG_DIR}" 2>/dev/null
+    fi
+
+    if ! cmccyun_prepare "${BIN}"; then
+        cmccyun_log "准备工作失败，继续尝试启动"
+    fi
+
+    cmccyun_env
+    cmccyun_log "启动服务 (user=${ru:-root}, bin=${BIN}, port=${CMCCYUN_PORT})"
+    if [ -n "${ru}" ]; then
+        nohup runuser -u "${ru}" -- env "${CMCCYUN_ENVS[@]}" "${BIN}" run -c "${CMCCYUN_CFG}" >>"${CMCCYUN_STDOUT}" 2>&1 &
+    else
+        nohup env "${CMCCYUN_ENVS[@]}" "${BIN}" run -c "${CMCCYUN_CFG}" >>"${CMCCYUN_STDOUT}" 2>&1 &
+    fi
+    bg=$!
+
+    i=0
+    while [ "${i}" -lt 40 ]; do
+        pid="$(current_pid)"
+        pid_alive "${pid}" && break
+        pid_alive "${bg}" || break
+        sleep 0.25
+        i=$((i + 1))
+    done
+
+    pid="$(current_pid)"
+    if pid_alive "${pid}"; then
+        cmccyun_log "启动成功 (pid=${pid})"
+        return 0
+    fi
+    cmccyun_fail "服务启动失败，日志见 ${CMCCYUN_STDOUT} 与 ${CMCCYUN_LOG}"
+    cmccyun_dump_log 15
+    return 1
+}
+
+stop_process() {
+    local pid mp i
+    pid="$(current_pid)"
+    if pid_alive "${pid}"; then
+        cmccyun_log "停止服务 (pid=${pid})"
+        kill -TERM "${pid}" 2>/dev/null
+        i=0
+        while pid_alive "${pid}" && [ "${i}" -lt 40 ]; do
+            sleep 0.5
+            i=$((i + 1))
+        done
+        if pid_alive "${pid}"; then
+            cmccyun_log "进程未在 20 秒内退出，强制结束"
+            kill -KILL "${pid}" 2>/dev/null
+            sleep 1
+        fi
+    else
+        cmccyun_log "服务未在运行"
+    fi
+    rm -f "${CMCCYUN_PIDFILE}"
+
+    # 兜底：进程异常退出时挂载点可能残留。挂载点可以改，配置里是目标、
+    # mounted_at 记的是实际挂着的那里，两个都看一遍，别漏下僵尸挂载。
+    local cand mps
+    mps=""
+    [ -s "${CMCCYUN_CFG_DIR}/mounted_at" ] && mps="$(head -n1 "${CMCCYUN_CFG_DIR}/mounted_at" | tr -d '[:space:]')"
+    mp="$("${BIN}" path -c "${CMCCYUN_CFG}" 2>/dev/null | head -n1)"
+    for cand in ${mps} ${mp}; do
+        if is_mounted "${cand}"; then
+            cmccyun_log "清理残留挂载 ${cand}"
+            if ! "${BIN}" unmount -c "${CMCCYUN_CFG}" >>"${CMCCYUN_STDOUT}" 2>&1; then
+                cmccyun_fail "卸载 ${cand} 失败，请手动执行 fusermount3 -u \"${cand}\""
+                return 1
+            fi
+        fi
+    done
+    rm -f "${CMCCYUN_CFG_DIR}/mounted_at"
+    return 0
+}
+
+status_process() {
+    pid_alive "$(current_pid)"
+}
+
+case "${1:-}" in
+start)
+    start_process || exit 1
+    exit 0
+    ;;
+stop)
+    stop_process || exit 1
+    exit 0
+    ;;
+status)
+    if status_process; then
+        exit 0
+    fi
+    exit 3
+    ;;
+*)
+    echo "用法: $0 {start|stop|status}" >&2
+    exit 1
+    ;;
+esac

@@ -1,0 +1,44 @@
+#!/bin/bash
+# 安装完成：套用安装向导填写的内容，准备目录与权限
+set -u
+# 允许手动执行（缺省时从脚本位置推断飞牛 fnOS 注入的路径）
+APP_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+: "${TRIM_APPDEST:=${APP_ROOT}/target}"
+: "${TRIM_PKGETC:=${APP_ROOT}/etc}"
+: "${TRIM_PKGVAR:=${APP_ROOT}/var}"
+: "${TRIM_TEMP_LOGFILE:=/dev/null}"
+export TRIM_APPDEST TRIM_PKGETC TRIM_PKGVAR TRIM_TEMP_LOGFILE
+
+# 载入公共库；安装前置阶段应用文件可能尚未解包，此时退化为内置的最小实现
+CMCCYUN_COMMON=""
+for _p in "${TRIM_APPDEST}/fnos-common.sh" "${APP_ROOT}/app/fnos-common.sh" "${APP_ROOT}/fnos-common.sh"; do
+    if [ -r "${_p}" ]; then CMCCYUN_COMMON="${_p}"; break; fi
+done
+if [ -n "${CMCCYUN_COMMON}" ]; then
+    . "${CMCCYUN_COMMON}"
+else
+    cmccyun_log() { [ -n "${TRIM_TEMP_LOGFILE:-}" ] && [ "${TRIM_TEMP_LOGFILE}" != "/dev/null" ] && echo "[cmccyun] $*" >>"${TRIM_TEMP_LOGFILE}" 2>/dev/null; return 0; }
+    cmccyun_fail() { cmccyun_log "$*"; echo "移动云盘：$*" >&2; }
+fi
+
+BIN="$(cmccyun_bin)"
+mkdir -p "${CMCCYUN_VAR_DIR}" "${CMCCYUN_CFG_DIR}" "${CMCCYUN_STAGE}" 2>/dev/null
+touch "${CMCCYUN_STDOUT}" "${CMCCYUN_LOG}" 2>/dev/null
+
+# 包用户运行守护进程时，allow_other 需要 user_allow_other
+cmccyun_ensure_fuse_conf
+
+if [ ! -x "${BIN}" ]; then
+    cmccyun_fail "安装包内缺少可执行文件 ${BIN}"
+    exit 1
+fi
+chmod +x "${BIN}" 2>/dev/null
+
+if ! cmccyun_apply_wizard "${BIN}"; then
+    cmccyun_fail "写入配置失败，可稍后在应用设置中重试"
+    cmccyun_dump_log 10
+fi
+
+cmccyun_prepare "${BIN}"
+cmccyun_log "安装完成，挂载点：$("${BIN}" path -c "${CMCCYUN_CFG}" 2>/dev/null | head -n1)"
+exit 0

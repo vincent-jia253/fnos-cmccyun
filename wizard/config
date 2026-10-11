@@ -1,0 +1,53 @@
+[
+  {
+    "stepTitle": "移动云盘设置",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "修改后会自动重新挂载。授权留空表示保持当前授权不变；若授权过期（一般 30 天左右），请重新从浏览器复制新的 Authorization 填到这里。\n想让它出现在飞牛「文件」里，把「自定义挂载路径」填成自己的个人空间下的目录，例如 /vol4/1000/移动云盘（1000 是登录账号的 uid，可在「存储空间」里看到）。不填则挂在应用共享目录里。"
+      },
+      {
+        "type": "password",
+        "field": "wizard_authorization",
+        "label": "Authorization（留空则不修改）",
+        "initValue": "",
+        "rules": []
+      },
+      {
+        "type": "text",
+        "field": "wizard_mount_subdir",
+        "label": "挂载目录名（位于应用共享目录内）",
+        "initValue": "移动云盘",
+        "rules": [
+          {
+            "pattern": "^[^/\\\\]{1,64}$",
+            "message": "目录名不能包含 / 或 \\"
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "field": "wizard_mount_point",
+        "label": "自定义挂载路径（可选，绝对路径，如 /vol4/1000/移动云盘）",
+        "initValue": "",
+        "rules": []
+      },
+      {
+        "type": "select",
+        "field": "wizard_readonly",
+        "label": "挂载模式",
+        "initValue": "rw",
+        "options": [
+          {
+            "label": "读写（可上传/删除云盘文件）",
+            "value": "rw"
+          },
+          {
+            "label": "只读（仅浏览与下载）",
+            "value": "ro"
+          }
+        ]
+      }
+    ]
+  }
+]

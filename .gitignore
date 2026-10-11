@@ -1,0 +1,26 @@
+# 构建产物（由 build.sh 生成）
+/app/cmccyun-linux-*
+/cmccyun.fpk
+*.fpk
+
+# 二进制
+/cmccyun
+cmccyun-src/cmccyun
+
+# 运行/调试产物
+*.log
+*.pid
+staging/
+tmp/
+
+# 本地配置与备份（可能含授权串，绝不入库）
+config.json
+*config*.bak
+backups/
+*.sql
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,16 @@
+{
+    ".url": {
+        "cmccyun.main": {
+            "title": "移动云盘",
+            "icon": "images/icon_{0}.png",
+            "type": "iframe",
+            "protocol": "http",
+            "port": "19898",
+            "url": "/",
+            "allUsers": false,
+            "control": {
+                "accessPerm": "readonly"
+            }
+        }
+    }
+}

@@ -1,0 +1,27 @@
+[
+  {
+    "stepTitle": "卸载移动云盘",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "卸载会先停止服务并卸载挂载点；移动云盘上的文件不受影响，共享目录里的内容也会随后消失，需要保留的内容请先复制到本地磁盘。"
+      },
+      {
+        "type": "select",
+        "field": "wizard_keep_data",
+        "label": "应用数据（授权、日志、配置）",
+        "initValue": "keep",
+        "options": [
+          {
+            "label": "保留（重新安装后无需再次填写授权）",
+            "value": "keep"
+          },
+          {
+            "label": "删除",
+            "value": "delete"
+          }
+        ]
+      }
+    ]
+  }
+]

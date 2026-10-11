@@ -1,0 +1,14 @@
+{
+    "data-share": {
+        "shares": [
+            {
+                "name": "cmccyun",
+                "permission": {
+                    "rw": [
+                        "cmccyun"
+                    ]
+                }
+            }
+        ]
+    }
+}

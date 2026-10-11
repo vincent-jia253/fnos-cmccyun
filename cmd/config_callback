@@ -1,0 +1,48 @@
+#!/bin/bash
+# 应用设置保存后：写入配置，并在服务运行中时自动重新挂载
+set -u
+# 允许手动执行（缺省时从脚本位置推断飞牛 fnOS 注入的路径）
+APP_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+: "${TRIM_APPDEST:=${APP_ROOT}/target}"
+: "${TRIM_PKGETC:=${APP_ROOT}/etc}"
+: "${TRIM_PKGVAR:=${APP_ROOT}/var}"
+: "${TRIM_TEMP_LOGFILE:=/dev/null}"
+export TRIM_APPDEST TRIM_PKGETC TRIM_PKGVAR TRIM_TEMP_LOGFILE
+
+# 载入公共库；安装前置阶段应用文件可能尚未解包，此时退化为内置的最小实现
+CMCCYUN_COMMON=""
+for _p in "${TRIM_APPDEST}/fnos-common.sh" "${APP_ROOT}/app/fnos-common.sh" "${APP_ROOT}/fnos-common.sh"; do
+    if [ -r "${_p}" ]; then CMCCYUN_COMMON="${_p}"; break; fi
+done
+if [ -n "${CMCCYUN_COMMON}" ]; then
+    . "${CMCCYUN_COMMON}"
+else
+    cmccyun_log() { [ -n "${TRIM_TEMP_LOGFILE:-}" ] && [ "${TRIM_TEMP_LOGFILE}" != "/dev/null" ] && echo "[cmccyun] $*" >>"${TRIM_TEMP_LOGFILE}" 2>/dev/null; return 0; }
+    cmccyun_fail() { cmccyun_log "$*"; echo "移动云盘：$*" >&2; }
+fi
+
+BIN="$(cmccyun_bin)"
+mkdir -p "${CMCCYUN_VAR_DIR}" "${CMCCYUN_CFG_DIR}" "${CMCCYUN_STAGE}" 2>/dev/null
+touch "${CMCCYUN_STDOUT}" "${CMCCYUN_LOG}" 2>/dev/null
+
+cmccyun_ensure_fuse_conf
+if ! cmccyun_apply_wizard "${BIN}"; then
+    cmccyun_fail "写入配置失败，请检查 ${CMCCYUN_CFG} 是否可写"
+    exit 1
+fi
+cmccyun_prepare "${BIN}"
+
+# 服务在运行中时，让守护进程重新读取配置并重新挂载
+pid="$(cmccyun_pid)"
+if cmccyun_pid_alive "${pid}"; then
+    cmccyun_log "配置已更新，请求重新挂载"
+    if command -v curl >/dev/null 2>&1; then
+        out="$(curl -s -m 150 -X POST "http://127.0.0.1:${CMCCYUN_PORT}/api/remount" 2>&1)"
+        cmccyun_log "remount 响应: ${out}"
+    else
+        cmccyun_log "未找到 curl，跳过自动重挂载（重启应用后生效）"
+    fi
+else
+    cmccyun_log "服务未运行，配置将在下次启动时生效"
+fi
+exit 0
