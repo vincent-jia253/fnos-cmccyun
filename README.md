@@ -176,7 +176,7 @@ go vet ./...
 sudo appcenter-cli status cmccyun   # 状态
 sudo appcenter-cli start  cmccyun   # 启动
 sudo appcenter-cli stop   cmccyun   # 停止（别用 pkill，进程名是 cmccyun-linux-a）
-sudo /var/apps/cmccyun/cmd/main status   # 应用自身状态
+sudo /var/apps/cmccyun/cmd/main status   # 应用自身状态（只看退出码：0 运行中 / 3 未运行）
 ```
 
 日志：
