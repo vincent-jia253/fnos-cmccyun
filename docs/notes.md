@@ -6,8 +6,7 @@
 
 - 应用名：`cmccyun`（显示名「移动云盘」）
 - 版本：**1.3.2**，平台 `all`（内置 linux/amd64 与 linux/arm64 两个二进制，CGO_ENABLED=0，无外部依赖）
-- 安装包：仓库 [Releases](https://github.com/vincent-jia253/fnos-cmccyun/releases) 里的 `cmccyun-1.3.2.fpk`
-  （6,791,237 字节，md5 `3f9f6e6d18ddc849fd7bb42f267e19a3`；本地 `./build.sh` 可复现）
+- 安装包：`./build.sh` 产出的 `cmccyun.fpk`（发布版见仓库 Releases，md5 记在对应的 Release 说明里）
 - 管理台端口：**19898**（`http://<NAS_IP>:19898/`）
 
 ---
@@ -78,7 +77,7 @@ v1.3.0 的界面里，顶栏（以及「云盘浏览」卡片标题栏）用来�
 | **残留（僵尸）挂载自动清理** | 上次进程被 `kill -9` 或掉电后，`/proc/mounts` 里会留下一个"空壳"挂载点，一访问就 `ENOTCONN`（"Transport endpoint is not connected"），以前会被当成"已挂载"从而拒绝再挂。新增 `vfs.Dead(dir)` 识别这种挂载：启动时、点挂载时都会**先卸掉再重挂**；配置路径与残留路径不一致时界面给出提示并提供**一键清理**按钮 |
 | **界面重做** | 按页签分区：**挂载设置 / 授权 / 云盘浏览 / 运行日志**；统一的深色/浅色主题、状态卡、气泡提示（toast）、按钮加载态、表单分组；手机窄屏与深色模式一并适配；目录选择器保留（v1.2.1 的「文件夹树 + 内容」两栏） |
 
-截图见 `docs/screenshots/console-v1.3.0-*.png`。
+截图见 `docs/screenshots/console-v1.3.0-*.png`（截图不入库，仅本地留存）。
 
 ### v1.2.1 变更：位置选择器改成「文件夹树 + 目录内容」（并顺手修掉一个能遮住文件的坑）
 
@@ -156,24 +155,23 @@ SMB 共享、影视刮削、Emby 之类的也能直接指过去（读权限、�
 ## 2. 目录结构
 
 ```
-fnos-cmccyun/
-├── fnos-cmccyun/            # fpk 打包工程（可直接 build）
-│   ├── manifest             # 应用元信息（版本/端口/桌面入口）
-│   ├── config/{privilege,resource}   # 运行身份 + 数据共享目录声明
-│   ├── cmd/                 # fnOS 生命周期脚本（install/config/upgrade/uninstall/main）
-│   ├── wizard/              # 安装/设置/卸载向导（JSON）
-│   ├── app/                 # 进包内容：双架构二进制、fnos-common.sh、ui/
-│   ├── build.sh             # 一键构建：编译 → fnpack build → 产出 cmccyun.fpk
-│   └── cmccyun.fpk          # ★ 构建产物（release 附件）
-├── cmccyun-src/             # Go 源码（~4000 行）：API 客户端、FUSE VFS、管理台、CLI
+fnos-cmccyun/                 # 仓库根 = fpk 打包工程
+├── manifest                  # 应用元信息（版本/端口/桌面入口/changelog）
+├── config/{privilege,resource}   # 运行身份 + 数据共享目录声明
+├── cmd/                      # fnOS 生命周期脚本（install/config/upgrade/uninstall/main）
+├── wizard/                   # 安装/设置/卸载向导（JSON）
+├── app/                      # 进包内容：fnos-common.sh 与 ui/（源码）+ 双架构二进制（build.sh 生成）
+├── build.sh                  # 一键构建：编译 → fnpack build → 产出 cmccyun.fpk
+├── cmccyun-src/              # Go 源码（~4000 行）：API 客户端、FUSE VFS、管理台、CLI
 │   ├── internal/vfs/overlay.go   # CD2 式覆盖写入（局部改动只暂存改动区间）
 │   └── internal/api/retry.go     # OpenList 式分片上传重试
-├── tests/                   # 测试脚本（见第 7 节）
-├── tools/make_icons.py      # 图标生成
-└── docs/
-    ├── notes.md             # 本文（开发/实测记录）
-    └── cmcc-cloud-api.md    # 移动云盘接口调研：官方开放平台全表 + 网页私有 API 清单
+├── tests/                    # 测试脚本（见第 7 节）
+├── tools/make_icons.py       # 图标生成
+└── docs/                     # 本文（开发/实测记录） + 接口调研
 ```
+
+> 开发机上还有一份**不入库**的调研资料（`../research/`：移动云官方开放平台接口全表、
+> Alist 139 驱动清单、飞牛官方开发文档摘录），其中接口结论已整理进 `docs/cmcc-cloud-api.md`。
 
 ---
 
