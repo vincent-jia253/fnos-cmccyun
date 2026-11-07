@@ -97,7 +97,14 @@ echo "== 6. 新令牌是否写回配置 =="
 # 写回是异步的（回调在客户端请求内部触发，不能持调用方的锁），等它落地
 now_auth=""
 for i in $(seq 1 25); do
-    now_auth="$(python3 -c "import json;print(json.load(open('$ROOT/etc/config.json'))['authorization'])" 2>/dev/null)"
+    # v1.7.0 起授权存在 accounts[0].authorization 里，老配置顶层字段也会被迁移过去；
+    # 两种写法都读一下，免得只看顶层就误判成「没写回」。
+    now_auth="$(python3 -c "
+import json
+d = json.load(open('$ROOT/etc/config.json'))
+acc = (d.get('accounts') or [{}])[0]
+print(acc.get('authorization') or d.get('authorization') or '')
+" 2>/dev/null)"
     [ "$now_auth" = "$NEW_AUTH" ] && break
     sleep 0.2
 done
