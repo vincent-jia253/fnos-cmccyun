@@ -37,6 +37,61 @@
    > **实测（2026-10-12 真实账号）**：手动点「刷新令牌」→ 新到期 2026-11-11 00:40（整整 30.0 天），
    > 新令牌已写回 `config.json`，随后用新凭据列云端目录 / 真读文件都正常 —— 续期确实有效，30 天到期不会断。
 
+### v1.5.0 变更：远程挂载（WebDAV）—— 换一条「飞牛自己挂」的路
+
+**背景**：用户想把云盘塞进飞牛「远程挂载」里那三张网盘卡片。逆向结论是那三张卡片
+（115 / 123 / 百度）写死在闭源的 `/usr/trim/bin/cloud_storage_dav` 里，靠 `_115_open`、
+`baidu_netdisk` 这类内嵌驱动干活，**没有第三方注册接口**，改库或改二进制都会被系统升级覆盖。
+但「远程挂载 → 挂载远程文件夹」对用户是开放的，`mountmgr` 背后是 `rclone rcd`，
+**协议里就有 WebDAV**。所以改成「应用自己当 WebDAV 服务端」，让飞牛来挂我们。
+
+**实现（`cmccyun-src/internal/dav/dav.go`，670 行）**：
+
+- `dav.FS` 实现 `webdav.FileSystem`（`golang.org/x/net/webdav`），底层是 `dav.Backend` 接口，
+  `*api.Client` 直接满足（`List/Mkdir/Rename/Move/Trash/Download/DownloadURL/UploadReader`）。
+  这样单测可以用内存假后端，不用连云端。
+- **路径 → fileId**：139 没有这个接口，只能 `file/list` 逐级下钻。所以目录列表带
+  `CacheTTL`（默认 5 秒）缓存 + 每次写操作后 `Invalidate(parentID)`；不加缓存的话
+  Emby/影视刮一个库就是几千次 `file/list`。
+- **读**：`Download(id, offset, -1)` 真流；`Seek` 只更新 `off` 并关掉旧流，
+  下一次 `Read` 才按新偏移重开——`http.ServeContent` 会先 `Seek(0, io.SeekEnd)` 探大小，
+  这样那次探测不花网络；`Seek(0,Start)` 也是零成本。
+- **写**：`OpenFile` 带 `O_WRONLY|O_RDWR` 时返回 `uploadFile`，内容先写进
+  `StageDir` 的临时文件（`os.CreateTemp`），`Close` 时 `UploadReader` 整文件分片上传后删临时文件。
+  这就是 WebDAV 那条路「改大文件要整文件重传」的根因：协议是「写完再落」，没有区间信息。
+- **删除**：`Trash([id])` → 进云端回收站，可还原。
+- **MOVE**：同一父目录只 `Rename`，跨目录先 `Move` 再按需 `Rename`；目标已存在时先 `Trash`（覆盖语义）。
+- **错误映射**：直接返回 `os.ErrNotExist / os.ErrExist / os.ErrPermission` 这几个哨兵，
+  因为 `webdav.Status()` 用的是 `os.IsNotExist` 家族（不吃 `%w` 包装）。
+
+**HTTP 层（`internal/app/dav.go`，318 行）**：
+
+- `davProxy` 让 `webdav.Handler` 手里的 FileSystem 能跟着 client 重建（换账号/重新登录后缓存作废）。
+- `/dav/` 上先 BasicAuth（`subtle.ConstantTimeCompare`），配置来自 `dav_user` / `dav_password`，
+  **和 `Authorization` 完全隔离**——重置密码不影响挂载，关开关直接 503。
+- **GET/HEAD 默认 302 到 CDN 签名链接**（`dav_redirect`，默认开）：4K 播放不绕 NAS 带宽。
+  实测 `curl -L -r 100-1123` 返回 206；rclone `--offset/--count` 读出来的 md5 与 `dd` 切片一致。
+- 只读模式在 HTTP 层先拦（403 + 中文提示），不然 webdav 库会把 `os.ErrPermission`
+  在 PUT 上翻成 404（`handlePut` 的非 NotExist 分支一律 404），客户端会误判成路径写错。
+- `localIPv4()` 只列真实网卡：跳过 `docker* / br-* / veth* / virbr* / tun / tap / zt / wg`，
+  按 192.168 → 10/8 → 172.16/12 排序（真机上 Docker 一开，不过滤会列出 19 条 172.x）。
+- `Logger` 里必须 `if err == nil { return }`：x/net 有些分支带 nil 回调，原样打会刷
+  「出错：<nil>」的假警报。
+
+**真机互操作（rclone 1.x，跑的是 fpk 里的二进制）**：
+`lsd` 根 6 项 → `mkdir` → 上传 2 MB（md5 一致）→ `cat` 回读（一致）→ `--offset/--count` 分段（一致）
+→ `moveto` 改名 → `copyto` 复制 → 上传 **120 MB**（跨 100 MB 分片，8 秒）→ 回读 120 MB（md5 一致）
+→ `purge` 清空（进回收站，云盘根目录干净）。
+
+**测试**：`internal/dav/dav_test.go`（内存假后端 + `webdav.Handler` 走 HTTP：PUT/GET 往返、Range、
+PROPFIND+反向 Seek、MOVE/DELETE、只读拒绝、目录缓存计数、根解析）；
+`internal/app/dav_test.go`（默认关闭、开关生成 16 位密码、BasicAuth 门禁、只读拦截 403、
+`/api/dav/config` 只收 POST、页面元素齐全）。全量 **87 项**（v1.4.0 是 74 项）。
+
+**升级坑（这次又踩了一次）**：飞牛在旧进程还占着二进制时，`install-fpk` 可能只更新清单、
+不替换 `/volN/@appcenter/<app>/<app>-linux-amd64`，表现为「升级完版本号没变」。
+正确姿势：`appcenter-cli stop` → 安装（或直接 `cp` 包里的二进制覆盖）→ `start`。
+
 ### v1.4.0 变更：扫码登录（保留手工粘贴）+ 云盘浏览能写 + 开发者署名 vincent
 
 **扫码登录**（`cmccyun-src/internal/api/qrlogin.go` + `internal/app/qr.go`）：
@@ -309,7 +364,7 @@ tail -f /var/log/apps/cmccyun.log              # 安装/升级脚本的诊断输
 
 **卸载**：在应用中心界面点卸载即可（先自动停服务、卸挂载）。
 `appcenter-cli uninstall` 在飞牛上会被拒绝（提示「请在 Web UI 卸载」），
-命令行环境下可执行 `tests/fnos-reinstall.sh` 里的手工流程：
+命令行环境下可执行 `generated/tests/fnos-reinstall.sh` 里的手工流程：
 
 ```bash
 sudo appcenter-cli stop cmccyun
@@ -346,7 +401,7 @@ GO=go VERSION=1.3.2 ./build.sh   # 需要 Go 1.24+ 与 fnpack
 `build.sh` 会交叉编译 linux/amd64 与 linux/arm64 两个静态二进制（`CGO_ENABLED=0`）、
 同步 `manifest` 里的版本号、整理进包文件权限，最后调 `fnpack build` 出包。
 
-### 测试脚本（均在 `tests/`，需 root 的部分用 `sudo bash`）
+### 测试脚本（均在 `generated/tests/`，需 root 的部分用 `sudo bash`）
 
 | 脚本 | 作用 | 最近一次结果 |
 |---|---|---|
@@ -374,7 +429,7 @@ GO=go VERSION=1.3.2 ./build.sh   # 需要 Go 1.24+ 与 fnpack
 开发调试（不需要真云盘）：
 
 ```bash
-cd tests
+cd generated/tests
 bash make-fixtures.sh    # 造 /tmp/cct/backend（文本 + 3 MB + 25 MB 假文件）
 bash fake-daemon.sh start   # 隔离实例：cmccyun-test + 端口 19896（不碰线上真挂载）
 bash functional.sh       # 跑 23 项功能测试
