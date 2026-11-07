@@ -2,6 +2,32 @@
 
 版本号与应用内 `manifest` 的 `changelog` 字段保持一致；安装包在 [Releases](https://github.com/vincent-jia253/fnos-cmccyun/releases) 里。
 
+## v1.4.0
+
+**新增扫码登录**，同时完整保留手工粘贴——两条路都留着，谁方便用谁。
+
+- 「授权」页最上面是**扫码登录**：点「生成二维码」→ 手机「中国移动云盘」App 扫一下 →
+  手机上点确认 → 控制台显示「已扫码」→「登录成功」，授权自动保存并顺手挂载。
+  没授权时进入该页会自动生成，省掉一次点击。
+- 二维码由**服务端渲染成 PNG**、以 data URI 交给页面（新增依赖 `skip2/go-qrcode`，纯 Go 无 CGO），
+  所以控制台**不依赖外网 CDN**、内网/离线环境一样能用。
+- 握手过程全部在 `internal/api/qrlogin.go`：取 RSA 公钥 → `skey = RSA_PKCS1(AUTH_KEY)` →
+  轮询体 `AES-256-CBC` 加密封包 → `user/thirdlogin` → 响应里的 `AES-128-ECB(hex)` 解出账号与令牌 →
+  拼成 `base64("pc:账号:令牌")`，**直接喂给原来的 `Client.SetAuthorization`**，续期/挂载逻辑零改动。
+  状态码映射 waiting / scanned / expired / cancelled，会话 5 分钟、只在内存里（`skey` 不落盘）。
+- **「云盘浏览」页从只读变成能干活**：新增 **新建文件夹 / 上传 / 下载 / 重命名 / 删除**
+  （删除进云盘回收站，可还原），上传走分片、不设前端超时；改动直接作用在云端，
+  挂载目录按目录缓存 TTL（默认 60 秒）自动同步。
+  顺带修掉一处隐患：云端 `/file/create` 只回「最终用的名字」，控制台新建后要回读父目录拿真实 `fileId`。
+- 原「手工粘贴 Authorization」原样保留，作为**备选**：手机不在身边、扫码接口被网络策略拦、
+  脚本批量部署时用。两段说明、一张对比表放在同一页，最后都走同一套「保存 → 建客户端 → 自动续期 → 挂载」。
+- **界面**：授权页改成分卡片布局（扫码 / 手工 / 对比说明）；页脚显示版本、开发者与开源地址；
+  浏览器标签页补上应用图标（内嵌 SVG favicon）；README 顶部放应用图标。
+- **开发者署名改为 `vincent`**（`manifest` 的 `maintainer` / `distributor`、`LICENSE`、页面页脚）。
+- 回归测试：`internal/api/qrlogin_test.go`（明文包结构、封包往返、hex+AES-128-ECB 解包、
+  用假服务器跑完整扫码流程、状态码映射、坏 handle）、`internal/app/qr_test.go`
+  （两种登录入口都在、二维码不依赖外链、路由已注册、会话表不泄漏）。
+
 ## v1.3.2
 
 给「授权 剩余 N 天」加说明（用户会问「这个天数是什么情况」）：

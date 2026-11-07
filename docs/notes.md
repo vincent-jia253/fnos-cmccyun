@@ -37,6 +37,31 @@
    > **实测（2026-10-12 真实账号）**：手动点「刷新令牌」→ 新到期 2026-11-11 00:40（整整 30.0 天），
    > 新令牌已写回 `config.json`，随后用新凭据列云端目录 / 真读文件都正常 —— 续期确实有效，30 天到期不会断。
 
+### v1.4.0 变更：扫码登录（保留手工粘贴）+ 云盘浏览能写 + 开发者署名 vincent
+
+**扫码登录**（`cmccyun-src/internal/api/qrlogin.go` + `internal/app/qr.go`）：
+
+- 取公钥 → `skey = RSA_PKCS1_PADDING(AUTH_KEY, publicKey)` → 二维码内容
+  `https://yun.139.com/w/#/qrcLogin?sID=<sid>&dID=<deviceID>&cType=9`；
+- 轮询体 `{"dycpwd":<sid>, "secinfo":SHA1("fetion.com.cn:"+sid) 大写,…}`
+  用 **AES-256-CBC(AUTH_KEY, 随机 IV)** 封成 `base64(IV||密文)` 发给 `user/thirdlogin`，
+  签名 `mcloud-sign` 签的是**明文** payload；
+- 响应可能是封包，也可能是 JSON；`data` 为字符串时先 hex 解码再 **AES-128-ECB(DATA_KEY)**，
+  解出 `{account, token}` → 拼 `base64("pc:账号:令牌")` → **直接交给原来的 `Client.SetAuthorization`**，
+  所以续期、挂载、状态显示全都不用改。
+- 状态码：`200059541` 等待 / `200059548` 已扫 / `200059542` 过期 / `200059549` 取消。
+- 二维码由**服务端**渲染成 PNG（`skip2/go-qrcode`，纯 Go），以 data URI 给前端，控制台不连外网 CDN。
+  会话只在内存里、5 分钟过期，`skey` 不落盘；浏览器只拿到一个随机 id。
+- 回归测试：`internal/api/qrlogin_test.go`（明文包结构 / 封包往返 / hex+ECB 解包 /
+  假服务器跑完整流程 / 状态码 / 坏 handle）、`internal/app/qr_test.go`（双入口都在、不依赖外链、路由已注册）。
+
+**云盘浏览能写**（`internal/app/remote.go`）：新增 `/api/remote/{mkdir,rename,trash,download,upload}`，
+页面上给了新建文件夹 / 上传 / 下载 / 重命名 / 删除。注意云端 `/file/create` 只回「最终用的名字」，
+所以新建之后要回读父目录拿真正的 `fileId`（`childID()`），否则后续操作全报 `00010002`。
+
+**署名**：`manifest` 的 `maintainer` / `distributor`、`LICENSE`、控制台页脚都写 `vincent`；
+控制台加了内嵌 SVG favicon，README 顶部放应用图标。
+
 ### v1.3.2 变更：给「授权 剩余 N 天」加悬停说明
 
 「授权 剩余 29.7 天」看着像个倒计时但不知道是什么，用户会问「这个授权天数是什么情况」。现在**鼠标悬停即解释**：

@@ -11,6 +11,9 @@ const indexHTML = `<!DOCTYPE html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>移动云盘 · 挂载控制台</title>
+<meta name="author" content="vincent" />
+<meta name="description" content="把中国移动云盘（139 云盘）挂载成飞牛 fnOS 本地文件夹 · by vincent" />
+<link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+PHJlY3Qgd2lkdGg9IjMyIiBoZWlnaHQ9IjMyIiByeD0iOCIgZmlsbD0iIzI1NjNlYiIvPjxwYXRoIGQ9Ik0xMC4yIDIzaDEyLjNhNC4zIDQuMyAwIDAgMCAuNS04LjU3IDYuMiA2LjIgMCAwIDAtMTEuOS0xLjJBNC40IDQuNCAwIDAgMCAxMC4yIDIzWiIgZmlsbD0iI2ZmZiIvPjwvc3ZnPg==" />
 <style>
   :root{
     color-scheme:light dark;
@@ -198,6 +201,39 @@ const indexHTML = `<!DOCTYPE html>
   details.adv>summary::before{content:"▸ "; color:var(--faint);}
   details.adv[open]>summary::before{content:"▾ ";}
   details.adv .inner{padding:4px 14px 15px;}
+
+  /* ---------- 扫码登录 ---------- */
+  .qrwrap{display:flex; gap:18px; align-items:flex-start; flex-wrap:wrap;}
+  /* 二维码底色固定白：深色主题下也要能扫得动 */
+  .qrbox{
+    width:216px; height:216px; flex:0 0 auto; padding:8px; box-sizing:border-box;
+    border-radius:13px; border:1px solid var(--line); background:#fff;
+    display:grid; place-items:center; overflow:hidden;
+  }
+  .qrbox img{width:100%; height:100%; object-fit:contain; display:none; image-rendering:pixelated;}
+  .qrbox img.on{display:block;}
+  .qrph{text-align:center; color:#98a2b3; font-size:12.5px; line-height:1.6;}
+  .qrph .qico{font-size:30px; line-height:1; margin-bottom:9px; opacity:.4;}
+  .qrph.off{display:none;}
+  .qrside{flex:1 1 320px; min-width:0;}
+  .tag{
+    font-size:11.5px; font-weight:600; color:var(--accent); background:var(--accent-soft);
+    border:1px solid color-mix(in srgb,var(--accent) 22%,transparent);
+    padding:2px 8px; border-radius:999px; white-space:nowrap;
+  }
+  .cmp th:first-child, .cmp td:first-child{color:var(--muted); white-space:nowrap;}
+  .cmp td{vertical-align:top; line-height:1.55;}
+  .cmp td b{font-weight:560;}
+
+  /* ---------- 页脚 ---------- */
+  .pagefoot{
+    display:flex; gap:6px 18px; align-items:center; flex-wrap:wrap;
+    margin:22px 2px 0; padding-top:13px; border-top:1px solid var(--line);
+    font-size:12.3px; color:var(--muted);
+  }
+  .pagefoot b{color:var(--fg); font-weight:560;}
+  .pagefoot a{color:var(--accent); text-decoration:none;}
+  .pagefoot a:hover{text-decoration:underline;}
 
   /* ---------- 标签页 ---------- */
   .tabs{display:flex; gap:5px; padding:5px; border-radius:13px; background:var(--card); border:1px solid var(--line); box-shadow:var(--shadow); overflow-x:auto;}
@@ -417,8 +453,48 @@ const indexHTML = `<!DOCTYPE html>
 
     <!-- ===== 授权 ===== -->
     <section class="panel" id="tab-auth">
+
+      <!-- ① 扫码登录：推荐路径 -->
       <div class="card">
-        <div class="hd"><h2>授权（Authorization）</h2><span class="sub">约 30 天有效期，应用会自动续期</span></div>
+        <div class="hd">
+          <h2>扫码登录</h2><span class="tag">推荐</span>
+          <span class="sub">手机扫一下就行，不用开 F12 抓包</span>
+        </div>
+        <div class="bd">
+          <div class="qrwrap">
+            <div class="qrbox">
+              <img id="qrImg" alt="登录二维码" src="" />
+              <div id="qrPh" class="qrph">
+                <div class="qico">▣</div>
+                <div>还没有二维码<br />点右侧「生成二维码」</div>
+              </div>
+            </div>
+            <div class="qrside">
+              <ol class="steps">
+                <li>手机打开<b>中国移动云盘</b>App（139 邮箱 / 移动云盘都可以），确认已登录。</li>
+                <li>用 App 里的「扫一扫」扫左边这个二维码。</li>
+                <li>手机上点<b>确认登录</b>；这边会自动保存授权，并且<b>顺手把云盘挂载好</b>。</li>
+              </ol>
+              <div class="actions">
+                <button id="btnQrStart" class="primary">生成二维码</button>
+                <button id="btnQrStop">停止</button>
+              </div>
+              <div id="qrMsg" class="msg"></div>
+              <div class="hint" style="margin-top:4px">
+                二维码 5 分钟有效、扫完即作废，是<b>一次性临时凭据</b>，不会保存到磁盘上。
+                服务端只保留一张内存里的会话表，进程重启就得重扫——这是故意的。
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ② 手工粘贴：备选路径 -->
+      <div class="card">
+        <div class="hd">
+          <h2>手工粘贴 Authorization</h2>
+          <span class="sub">备选：扫码用不了的时候（手机不在身边、脚本批量部署）</span>
+        </div>
         <div class="bd">
           <ol class="steps">
             <li>浏览器打开 <code>https://yun.139.com/w/</code> 并登录（用电脑版网页）。</li>
@@ -436,13 +512,36 @@ const indexHTML = `<!DOCTYPE html>
           </div>
           <div id="msgAuth" class="msg"></div>
           <div class="hint" id="authInfo" style="margin-top:6px" title=""></div>
+        </div>
+      </div>
+
+      <!-- ③ 两种方式怎么选 + 有效期说明 -->
+      <div class="card">
+        <div class="hd"><h2>两种登录方式怎么选</h2><span class="sub">两条路拿到的是同一种凭据，效果完全一样</span></div>
+        <div class="bd">
+          <table class="cmp">
+            <thead>
+              <tr><th></th><th>扫码登录</th><th>手工粘贴</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>要做几步</td><td><b>点一下 → 手机扫 → 确认</b></td><td>开网页登录 → F12 → 复制请求头 → 粘贴</td></tr>
+              <tr><td>电脑上要不要</td><td>只要这个控制台能打开</td><td>要能打开并登录 139 网页版</td></tr>
+              <tr><td>拿到的凭据</td><td>同一条 <code>base64("pc:账号:令牌")</code></td><td>同一条 <code>base64("pc:账号:令牌")</code></td></tr>
+              <tr><td>有效期</td><td>约 30 天，应用自动续期</td><td>约 30 天，应用自动续期</td></tr>
+              <tr><td>最合适</td><td><b>日常第一次装、换号、换手机</b></td><td>扫码被网络策略拦、脚本批量安装、远程帮人装</td></tr>
+            </tbody>
+          </table>
+          <div class="hint" style="margin-top:11px">
+            两个入口最后都走同一套逻辑：写进配置 → 建立客户端 → 自动续期 → 挂载。所以<b>随便挑一个</b>，哪个方便用哪个，失败了就换另一个试。
+          </div>
           <div class="hint" style="margin-top:12px; padding-top:11px; border-top:1px dashed var(--line)">
             <b>顶栏「授权 剩余 N 天」指的是什么？</b>
             它是<b>这条 Authorization 自身</b>的剩余有效期，由云盘服务端写死在令牌里（约 30 天），
             <b>不是</b>会员到期日、也不是本地估算 —— 每天自然递减，不用管它。
             剩余不足 <b>15 天</b>时应用每 6 小时会自动续期一次，成功后回到约 30 天（见上方「上次自动续期」）；
             任何请求遇到鉴权失败也会立刻续期并重试一次。
-            只有续期本身失败（例如网页端已退出登录、改过密码）时才需要重新抓一条 Authorization 粘进来。
+            只有续期本身失败（例如网页端已退出登录、改过密码）时才需要重新抓一条 Authorization 粘进来，
+            或者重新扫一次码。
           </div>
         </div>
       </div>
@@ -453,19 +552,27 @@ const indexHTML = `<!DOCTYPE html>
       <div class="card">
         <div class="hd">
           <h2>云盘浏览</h2>
-          <span class="sub">用来确认授权有效、云盘内容可读（这里看的是云端，不是挂载点）</span>
+          <span class="sub">直接操作云端（这里不是挂载点）；删除进云盘回收站，可还原</span>
           <span class="grow"></span>
           <button id="btnUp" class="sm">返回上级</button>
         </div>
         <div class="bd">
           <div class="row" style="margin-bottom:11px">
             <span class="crumb">当前目录：<span id="curDir">/</span></span>
+            <span class="grow"></span>
+            <button id="btnRemoteMkdir" class="sm">新建文件夹</button>
+            <button id="btnRemoteUpload" class="sm">上传文件</button>
+            <input id="f_upload" type="file" multiple style="display:none" />
           </div>
           <div class="scroll">
             <table>
-              <thead><tr><th>名称</th><th>类型</th><th style="text-align:right">大小</th></tr></thead>
-              <tbody id="browseBody"><tr><td colspan="3" class="empty">尚未加载</td></tr></tbody>
+              <thead><tr><th>名称</th><th>类型</th><th style="text-align:right">大小</th><th style="text-align:right">操作</th></tr></thead>
+              <tbody id="browseBody"><tr><td colspan="4" class="empty">尚未加载</td></tr></tbody>
             </table>
+          </div>
+          <div class="hint" style="margin-top:10px">
+            这里的改动作用在<b>云端</b>：飞牛挂载目录里最多 <b>60 秒</b>后同步（目录缓存 TTL）。
+            删除是「移到云盘回收站」，可在 139 网页版或 App 里还原；大文件上传按分片进行，关掉页面会中断。
           </div>
         </div>
       </div>
@@ -486,6 +593,13 @@ const indexHTML = `<!DOCTYPE html>
     </section>
 
   </div>
+
+  <footer class="pagefoot">
+    <span>移动云盘 for 飞牛 fnOS · <b>v<span id="footVer">—</span></b></span>
+    <span>开发者 <b>vincent</b></span>
+    <span class="grow"></span>
+    <span>开源 <a href="https://github.com/vincent-jia253/fnos-cmccyun" target="_blank" rel="noreferrer">github.com/vincent-jia253/fnos-cmccyun</a> · MIT</span>
+  </footer>
 </main>
 
 <!-- ===== 位置选择器 ===== -->
@@ -613,13 +727,13 @@ function esc(s) {
 
 /* 授权天数的悬停说明：这是「这条 Authorization 自身」的剩余有效期，不是会员到期日。 */
 var AUTH_TIP = [
-  "这是你粘贴的 Authorization（网页登录态）自身的剩余有效期，由云盘服务端写死在令牌里，约 30 天。",
+  "这是当前这条 Authorization 自身的剩余有效期（扫码登录和手工粘贴拿到的完全一样），由云盘服务端写死在令牌里，约 30 天。",
   "不是会员到期日，也不是本地估算。",
   "",
   "· 只是个倒计时，每天自然递减，无需理会；",
   "· 剩余不足 15 天时，应用每 6 小时会自动续期一次，成功后回到约 30 天；",
   "· 任何请求遇到鉴权失败，也会立刻强制续期并重试一次；",
-  "· 只有续期本身失败（例如网页端已退出登录、改过密码）时，才需要重新抓一条 Authorization 粘进来。",
+  "· 只有续期本身失败（例如网页端已退出登录、改过密码）时，才需要重扫二维码或重新抓一条 Authorization 粘进来。",
   "",
   "也可以点「刷新令牌」立即续期一次（可用来确认续期可用）。"
 ].join("\n");
@@ -636,6 +750,8 @@ function showTab(name) {
   }
   if (name === "logs") loadLogs();
   if (name === "browse" && !browseLoaded && lastSt && lastSt.has_token) { browseLoaded = true; browse("/"); }
+  // 第一次进「授权」页又没授权时，直接把二维码摆出来——少点一次按钮
+  if (name === "auth" && !qrAutoStarted && lastSt && !lastSt.has_token) { qrAutoStarted = true; qrStart(); }
 }
 document.querySelectorAll(".tab").forEach(function (b) {
   b.onclick = function () { showTab(b.dataset.tab); };
@@ -746,6 +862,8 @@ async function refresh() {
     };
   }
 
+  $("footVer").textContent = st.version || "—";
+
   // 表单（挂载位置正在编辑时不要覆盖用户输入）
   if (document.activeElement !== $("f_mount")) $("f_mount").value = mp;
   $("f_ro").checked = !!cfg.read_only;
@@ -790,6 +908,87 @@ async function loadLogs() {
     if ($("f_follow").checked) pre.scrollTop = pre.scrollHeight;
   } catch (e) { $("logs").textContent = e.message; }
 }
+
+/* ---------------- 扫码登录 ---------------- */
+// 二维码是服务端用 PNG 渲出来的，前端只负责显示 + 轮询；会话 id 是随机的，
+// 真正的凭据（skey）留在服务端，不落盘。
+var qrId = "", qrTimer = null, qrStopFlag = false, qrAutoStarted = false;
+
+function qrSetImage(on) {
+  $("qrImg").className = on ? "on" : "";
+  $("qrPh").className = on ? "qrph off" : "qrph";
+}
+
+function qrHalt(msg) {
+  qrStopFlag = true;
+  if (qrTimer) { clearTimeout(qrTimer); qrTimer = null; }
+  $("btnQrStart").disabled = false;
+  if (msg) say("qrMsg", msg, false);
+}
+
+async function qrStart() {
+  var b = $("btnQrStart");
+  qrStopFlag = false;
+  if (qrTimer) { clearTimeout(qrTimer); qrTimer = null; }
+  busy(b, true, "生成中…");
+  try {
+    var d = await api("/api/auth/qr/start", { method: "POST", timeout: 45000 });
+    qrId = d.id || "";
+    $("qrImg").src = d.image;
+    qrSetImage(true);
+    var mins = Math.max(1, Math.round((d.expires_in || 300) / 60));
+    say("qrMsg", "请用手机 App 扫左边的二维码（" + mins + " 分钟内有效）", true);
+    qrPoll();
+  } catch (e) {
+    qrSetImage(false);
+    say("qrMsg", "生成失败：" + e.message, false);
+    toast("生成二维码失败", "err");
+  }
+  busy(b, false);
+}
+
+async function qrPoll() {
+  if (qrStopFlag || !qrId) return;
+  var again = true;
+  try {
+    var d = await api("/api/auth/qr/poll?id=" + encodeURIComponent(qrId), { method: "POST", timeout: 45000 });
+    var st = d.status || "";
+    if (st === "waiting") {
+      say("qrMsg", "等手机扫码…", true);
+    } else if (st === "scanned") {
+      say("qrMsg", "已扫码，请在手机上点「确认登录」…", true);
+    } else if (st === "confirmed") {
+      again = false;
+      qrStopFlag = true;
+      qrId = "";
+      qrSetImage(false);
+      say("qrMsg", "登录成功：" + (d.account || "账号已绑定") + "，授权已保存，正在挂载…", true);
+      toast("扫码登录成功", "ok");
+      await refresh();
+      await loadLogs();
+      // 后台挂载需要几秒，过一会儿再刷新两次状态，别让用户以为卡住了
+      setTimeout(function () { if (!document.hidden) refresh(); }, 3000);
+      setTimeout(function () { if (!document.hidden) refresh(); }, 9000);
+    } else if (st === "expired") {
+      again = false;
+      qrSetImage(false);
+      qrHalt(d.message || "二维码已过期，请重新生成");
+    } else if (st === "cancelled") {
+      again = false;
+      qrSetImage(false);
+      qrHalt(d.message || "手机上取消了登录，请重新生成");
+    } else {
+      again = false;
+      qrHalt(d.message || "登录未完成，请重新生成二维码");
+    }
+  } catch (e) {
+    say("qrMsg", "状态查询失败：" + e.message, false);
+  }
+  if (again && !qrStopFlag) qrTimer = setTimeout(qrPoll, 2000);
+}
+
+$("btnQrStart").onclick = function () { qrStart(); };
+$("btnQrStop").onclick = function () { qrHalt("已停止，重新生成可以再来一次"); qrSetImage(false); };
 
 /* ---------------- 授权 ---------------- */
 $("btnSaveAuth").onclick = async function () {
@@ -907,39 +1106,133 @@ $("btnCopyPath").onclick = function () {
 };
 
 /* ---------------- 云盘浏览 ---------------- */
+// 这一页直接读写云端：新建文件夹 / 上传 / 下载 / 重命名 / 删除（进回收站）。
+// 目录用 id 记（139 的 id 就是路径），remoteMap 存当前层的条目，操作按钮靠它反查名字。
+var remoteDir = "";
+var remoteStack = [];
+var remoteMap = {};
+
+function remoteOps(e) {
+  var out = "";
+  if (!e.is_dir) out += '<button class="qlink" data-act="dl" data-id="' + esc(e.id) + '" title="直接从云端下载（302 到签名链接）">下载</button>';
+  out += '<button class="qlink" data-act="mv" data-id="' + esc(e.id) + '">重命名</button>';
+  out += '<button class="qlink" data-act="rm" data-id="' + esc(e.id) + '">删除</button>';
+  return '<td style="text-align:right; white-space:nowrap">' + out + "</td>";
+}
+
 async function browse(dir) {
-  $("browseBody").innerHTML = '<tr><td colspan="3" class="empty">加载中…</td></tr>';
+  $("browseBody").innerHTML = '<tr><td colspan="4" class="empty">加载中…</td></tr>';
   try {
     var d = await api("/api/remote/list?dir=" + encodeURIComponent(dir), { timeout: 60000 });
     var ents = d.entries || [];
+    remoteDir = dir || "";
+    remoteMap = {};
+    ents.forEach(function (e) { remoteMap[e.id] = e; });
     var rows = ents.filter(function (e) { return e.is_dir; }).map(function (e) {
       return '<tr><td><span class="fname"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.9"><path d="M3 7a2 2 0 0 1 2-2h3.6a2 2 0 0 1 1.4.6L11.4 7H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></svg>' +
-        '<span class="linklike" data-id="' + esc(e.id) + '" data-name="' + esc(e.name) + '">' + esc(e.name) + "</span></span></td><td>目录</td><td style=\"text-align:right\">—</td></tr>";
+        '<span class="linklike" data-id="' + esc(e.id) + '" data-name="' + esc(e.name) + '">' + esc(e.name) + "</span></span></td><td>目录</td><td style=\"text-align:right\">—</td>" +
+        remoteOps(e) + "</tr>";
     });
     var files = ents.filter(function (e) { return !e.is_dir; }).map(function (e) {
-      return '<tr><td><span class="fname"><span>' + esc(e.name) + "</span></span></td><td>文件</td><td style=\"text-align:right\">" + fmtSize(e.size) + "</td></tr>";
+      return '<tr><td><span class="fname"><span title="' + esc(e.name) + '">' + esc(e.name) + "</span></span></td><td>文件</td><td style=\"text-align:right\">" + fmtSize(e.size) + "</td>" +
+        remoteOps(e) + "</tr>";
     });
-    $("browseBody").innerHTML = rows.concat(files).join("") || '<tr><td colspan="3" class="empty">空目录</td></tr>';
-    $("browseBody").querySelectorAll(".linklike").forEach(function (a) {
-      a.onclick = function () {
-        dirStack.push(curDir);
-        curDir = a.dataset.id;
-        $("curDir").textContent = a.dataset.name;
-        browse(curDir);
-      };
-    });
+    $("browseBody").innerHTML = rows.concat(files).join("") || '<tr><td colspan="4" class="empty">空目录</td></tr>';
   } catch (e) {
-    $("browseBody").innerHTML = '<tr><td colspan="3" class="empty" style="color:var(--err)">' + esc(e.message) + "</td></tr>";
+    $("browseBody").innerHTML = '<tr><td colspan="4" class="empty" style="color:var(--err)">' + esc(e.message) + "</td></tr>";
   }
 }
 
-$("btnUp").onclick = function () {
-  if (!dirStack.length) return;
-  curDir = dirStack.pop();
-  $("curDir").textContent = curDir === "/" ? "/" : curDir;
-  browse(curDir);
+async function remoteAction(act, id) {
+  var e = remoteMap[id] || {};
+  if (act === "dl") {
+    window.location.href = "/api/remote/download?id=" + encodeURIComponent(id);
+    return;
+  }
+  if (act === "mv") {
+    var n = prompt("重命名「" + (e.name || "") + "」为：", e.name || "");
+    if (n === null) return;
+    n = n.trim();
+    if (!n || n === e.name) return;
+    try {
+      var r = await api("/api/remote/rename", { method: "POST", timeout: 40000, body: JSON.stringify({ id: id, name: n }) });
+      toast(r.message || "已重命名", "ok");
+    } catch (err) { toast("重命名失败：" + err.message, "err"); }
+    await browse(remoteDir);
+    return;
+  }
+  if (act === "rm") {
+    if (!confirm("把「" + (e.name || "") + "」移到云盘回收站？\n\n· 挂载目录里最多 60 秒后消失\n· 想找回就去 139 网页版或 App 的回收站还原")) return;
+    try {
+      var r2 = await api("/api/remote/trash", { method: "POST", timeout: 60000, body: JSON.stringify({ ids: [id] }) });
+      toast(r2.message || "已删除", "ok");
+    } catch (err2) { toast("删除失败：" + err2.message, "err"); }
+    await browse(remoteDir);
+  }
+}
+
+$("browseBody").onclick = function (ev) {
+  var b = ev.target.closest("[data-act]");
+  if (b) { ev.stopPropagation(); remoteAction(b.dataset.act, b.dataset.id); return; }
+  var a = ev.target.closest(".linklike");
+  if (a) {
+    remoteStack.push({ id: remoteDir, name: $("curDir").textContent });
+    remoteDir = a.dataset.id;
+    $("curDir").textContent = a.dataset.name;
+    browse(remoteDir);
+  }
 };
-$("btnLogs").onclick = loadLogs;
+
+$("btnUp").onclick = function () {
+  if (!remoteStack.length) return;
+  var prev = remoteStack.pop();
+  $("curDir").textContent = prev.id ? (prev.name || "/") : "/";
+  browse(prev.id);
+};
+
+$("btnRemoteMkdir").onclick = async function () {
+  var n = prompt("在当前目录新建文件夹，名字：", "");
+  if (n === null) return;
+  n = n.trim();
+  if (!n) return;
+  var b = this;
+  busy(b, true, "创建中…");
+  try {
+    var d = await api("/api/remote/mkdir", { method: "POST", timeout: 40000, body: JSON.stringify({ parent: remoteDir, name: n }) });
+    toast(d.message || "已创建", "ok");
+    await browse(remoteDir);
+  } catch (e) { toast("新建失败：" + e.message, "err"); }
+  busy(b, false);
+};
+
+$("btnRemoteUpload").onclick = function () { $("f_upload").click(); };
+
+$("f_upload").onchange = async function () {
+  var files = this.files || [];
+  if (!files.length) return;
+  var b = $("btnRemoteUpload");
+  busy(b, true, "上传中…");
+  var ok = 0, bad = 0;
+  for (var i = 0; i < files.length; i++) {
+    var fd = new FormData();
+    fd.append("file", files[i]);
+    try {
+      // 上传不设超时：大文件要走分片，几十 GB 都可能
+      var res = await fetch("/api/remote/upload?parent=" + encodeURIComponent(remoteDir), { method: "POST", body: fd });
+      var d = await res.json().catch(function () { return {}; });
+      if (!res.ok || d.ok === false) throw new Error(d.error || ("HTTP " + res.status));
+      ok++;
+      toast(d.message || ("已上传 " + files[i].name), "ok");
+    } catch (e) {
+      bad++;
+      toast("上传失败：" + files[i].name + "：" + e.message, "err");
+    }
+  }
+  $("f_upload").value = "";
+  busy(b, false);
+  if (ok || bad) toast("上传结束：成功 " + ok + " 个" + (bad ? ("，失败 " + bad + " 个") : ""), bad ? "warn" : "ok");
+  await browse(remoteDir);
+};
 
 /* ---------------- 位置选择器 ---------------- */
 var pickSel = "";

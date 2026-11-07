@@ -244,7 +244,7 @@ func ownerOf(path string) (uint32, uint32, os.FileMode, bool) {
 
 // primaryGID 返回某个 uid 的主组（/etc/passwd 里的 gid）。
 // fnOS 个人空间里的目录基本都是 user:Users，而 /volN/<uid> 本身属主是
-// <用户>:root —— 所以挂载点属主按「用户的主组」来，才和系统里其它目录一致。
+// vincent:root —— 所以挂载点属主按「用户的主组」来，才和系统里其它目录一致。
 func primaryGID(uid uint32) (uint32, bool) {
 	u, err := user.LookupId(strconv.FormatUint(uint64(uid), 10))
 	if err != nil {

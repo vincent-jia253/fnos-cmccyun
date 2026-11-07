@@ -2,8 +2,6 @@
 # 生命周期脚本验证：status / start(FakeBackend) / 挂载访问 / stop
 # 用法: sudo tests/fnos-lifecycle.sh
 set -u
-# 用于交叉用户访问验证的「其它用户」，可用环境变量覆盖
-OTHER_USER="${OTHER_USER:-nobody}"
 APP_DIR=/var/apps/cmccyun
 MAIN=$APP_DIR/cmd/main
 LC=/tmp/cmccyun-lc

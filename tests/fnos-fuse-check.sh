@@ -2,8 +2,6 @@
 # 在真实 fnOS 上用 FakeBackend 验证 FUSE 挂载、allow_other 与交叉用户访问
 # 用法: sudo tests/fnos-fuse-check.sh
 set -u
-# 用于交叉用户访问验证的「其它用户」，可用环境变量覆盖
-OTHER_USER="${OTHER_USER:-nobody}"
 ROOT=/tmp/cmccyun-fuse-test
 BIN=/vol4/@appcenter/cmccyun/cmccyun-linux-amd64
 RUNUSER=cmccyun

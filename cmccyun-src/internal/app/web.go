@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -101,6 +102,41 @@ func (s *Service) Handler() http.Handler {
 			msg = fmt.Sprintf("令牌已刷新，剩余 %.1f 天", st.ExpiresDays)
 		}
 		writeJSON(w, map[string]any{"ok": true, "auth": st, "message": msg})
+	})
+
+	// /api/auth/qr/start 生成登录二维码。二维码内容直接进 PNG、再以 data URI
+	// 回给前端，所以控制台不需要外网、不需要前端 QR 库。
+	mux.HandleFunc("/api/auth/qr/start", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, "请用 POST")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+		defer cancel()
+		id, png, ttl, err := s.StartQrLogin(ctx)
+		if err != nil {
+			writeErr(w, err.Error())
+			return
+		}
+		writeJSON(w, map[string]any{
+			"ok":         true,
+			"id":         id,
+			"image":      "data:image/png;base64," + base64.StdEncoding.EncodeToString(png),
+			"expires_in": ttl,
+		})
+	})
+
+	// /api/auth/qr/poll 轮询扫码状态。状态走 waiting/scanned/confirmed/expired/
+	// cancelled，confirmed 时服务端已经把授权写进配置并在后台挂载。
+	mux.HandleFunc("/api/auth/qr/poll", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+		defer cancel()
+		res, err := s.PollQrLogin(ctx, r.URL.Query().Get("id"))
+		if err != nil {
+			writeErr(w, err.Error())
+			return
+		}
+		writeJSON(w, res)
 	})
 
 	mux.HandleFunc("/api/test", func(w http.ResponseWriter, r *http.Request) {
@@ -314,6 +350,9 @@ func (s *Service) Handler() http.Handler {
 		}
 		writeJSON(w, map[string]any{"ok": true, "config": s.MaskPtr(), "status": s.Status()})
 	})
+
+	// 「云盘浏览」里的写操作（新建文件夹 / 重命名 / 回收站 / 下载 / 上传）
+	s.registerRemoteRoutes(mux)
 
 	return mux
 }

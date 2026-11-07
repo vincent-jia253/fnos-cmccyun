@@ -46,6 +46,11 @@ type Service struct {
 	mountedAt string
 	logs      *Ring
 	logger    *log.Logger
+	// 扫码登录的会话表（见 qr.go）：浏览器只拿到随机 id，含 skey 的 handle
+	// 留在服务端，不落盘。
+	qrMu  sync.Mutex
+	qr    map[string]*qrSession
+	qrSeq uint64
 }
 
 // New loads the configuration and prepares logging.
