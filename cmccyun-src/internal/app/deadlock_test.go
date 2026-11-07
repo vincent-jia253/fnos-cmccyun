@@ -47,7 +47,7 @@ func TestConsoleEntryPointsDoNotDeadlock(t *testing.T) {
 		}},
 		// 挂载点与配置一致（最常用的一次点击：什么都不改，直接点「挂载」）。
 		{"Update(mount_point) 与配置相同", func(s *Service, root string) error {
-			return s.Update(map[string]any{"mount_point": s.cfg.MountPoint})
+			return s.Update(map[string]any{"mount_point": acct0(s.cfg).MountPoint})
 		}},
 		{"Update(其它字段)", func(s *Service, root string) error {
 			return s.Update(map[string]any{"read_only": true, "uid": 1000, "gid": 1001, "auto_mount": true})
@@ -65,7 +65,7 @@ func TestConsoleEntryPointsDoNotDeadlock(t *testing.T) {
 		// 没授权时必须快速报错，而不是把锁攥着等网络。
 		{"Mount(未授权)", func(s *Service, root string) error { return s.Mount(context.Background()) }},
 		{"Remount(未授权)", func(s *Service, root string) error { return s.Remount(context.Background()) }},
-		{"refreshAuth(未授权)", func(s *Service, root string) error { return s.refreshAuth(context.Background(), true) }},
+		{"refreshAuth(未授权)", func(s *Service, root string) error { return s.refreshAuth(context.Background(), "", true) }},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -74,7 +74,7 @@ func TestConsoleEntryPointsDoNotDeadlock(t *testing.T) {
 			// 临时目录就是允许的卷根，所以 <root>/1000/移动云盘 能通过语法校验、
 			// 一路走到会取锁的那几行。
 			s, root := newMountSvc(t, "")
-			s.cfg.MountPoint = filepath.Join(root, "1000", "移动云盘")
+			acct0(s.cfg).MountPoint = filepath.Join(root, "1000", "移动云盘")
 			mustReturn(t, tc.name, 5*time.Second, func() error { return tc.run(s, root) })
 		})
 	}

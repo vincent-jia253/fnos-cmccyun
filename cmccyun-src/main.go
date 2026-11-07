@@ -39,7 +39,7 @@ func main() {
 		os.Exit(withService(*cfgPath, func(s *app.Service) error { return s.Unmount() }))
 	case "path":
 		os.Exit(withService(*cfgPath, func(s *app.Service) error {
-			fmt.Println(s.Config().MountPoint)
+			fmt.Println(defAccount(s.Config()).MountPoint)
 			return nil
 		}))
 	case "status":
@@ -125,9 +125,9 @@ func fnosInit(cfgPath string) int {
 		patch["mount_point"] = explicit
 	case sub != "" && share != "":
 		patch["mount_point"] = filepath.Join(share, sub)
-	case s.Config().MountPoint == "" && share != "":
+	case defAccount(s.Config()).MountPoint == "":
 		patch["mount_point"] = filepath.Join(share, "移动云盘")
-	case s.Config().MountPoint == "" && varRoot != "":
+	case defAccount(s.Config()).MountPoint == "" && varRoot != "":
 		patch["mount_point"] = filepath.Join(varRoot, "mnt")
 	}
 
@@ -152,12 +152,13 @@ func fnosInit(cfgPath string) int {
 	}
 
 	cfg := s.Config()
+	dac := defAccount(cfg)
 	fmt.Printf("配置已保存到 %s\n", s.ConfigPath())
-	fmt.Printf("挂载点: %s（只读: %v）\n", cfg.MountPoint, cfg.ReadOnly)
+	fmt.Printf("挂载点: %s（只读: %v）\n", dac.MountPoint, dac.ReadOnly)
 	fmt.Printf("暂存目录: %s\n", cfg.StageDir)
 
-	if cfg.MountPoint != "" {
-		if err := ensureMountDir(cfg.MountPoint); err != nil {
+	if dac.MountPoint != "" {
+		if err := ensureMountDir(dac.MountPoint); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
@@ -230,12 +231,16 @@ func prepare(cfgPath, user string) int {
 	if cfg.LogFile != "" {
 		dirs = append(dirs, filepath.Dir(cfg.LogFile))
 	}
-	if cfg.MountPoint != "" {
-		if err := ensureMountDir(cfg.MountPoint); err != nil {
+	for i := range cfg.Accounts {
+		mp := cfg.Accounts[i].MountPoint
+		if mp == "" {
+			continue
+		}
+		if err := ensureMountDir(mp); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
-		dirs = append(dirs, cfg.MountPoint)
+		dirs = append(dirs, mp)
 	}
 	for _, d := range dirs {
 		if d == "" {
@@ -269,7 +274,7 @@ func prepare(cfgPath, user string) int {
 			return 1
 		}
 	}
-	fmt.Printf("准备完成：挂载点 %s，运行用户 %s(%d:%d)\n", cfg.MountPoint, user, uid, gid)
+	fmt.Printf("准备完成：账号 %d 台，运行用户 %s(%d:%d)\n", len(cfg.Accounts), user, uid, gid)
 	return 0
 }
 
@@ -285,6 +290,14 @@ func walkChown(path string, uid, gid int) error {
 		}
 		return os.Lchown(p, uid, gid)
 	})
+}
+
+// defAccount 返回默认账号的配置（多账号下控制台的 CLI 子命令都作用于它）。
+func defAccount(cfg config.Config) config.AccountConfig {
+	if ac, ok := cfg.AccountByID(""); ok {
+		return *ac
+	}
+	return config.AccountConfig{}
 }
 
 func defaultConfigPath() string {
@@ -321,16 +334,20 @@ func mountAndWait(cfgPath string) int {
 		fmt.Fprintln(os.Stderr, "初始化失败:", err)
 		return 1
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	if err := s.Mount(ctx); err != nil {
-		cancel()
-		fmt.Fprintln(os.Stderr, "失败:", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	s.MountAll(ctx)
+	cancel()
+	n := 0
+	for _, row := range s.AccountsView() {
+		if row["mounted"] == true {
+			n++
+		}
+	}
+	if n == 0 {
+		fmt.Fprintln(os.Stderr, "失败: 没有任何账号挂载成功（看日志里的具体原因）")
 		return 1
 	}
-	cancel()
-
-	st := s.Status()
-	fmt.Printf("已挂载 %s（账号 %s）\n", st.MountPoint, st.Account)
+	fmt.Printf("已挂载 %d 个账号\n", n)
 
 	sig := make(chan os.Signal, 2)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -383,11 +400,8 @@ func run(cfgPath string) int {
 	// 影视 STRM 的定时扫描（默认 5 分钟，未启用时空转，成本约等于零）。
 	go s.StrmLoop(ctx)
 	if cfg.AutoMount {
-		mctx, mcancel := context.WithTimeout(ctx, 120*time.Second)
-		if err := s.Mount(mctx); err != nil {
-			s.Logf("自动挂载失败: %v", err)
-			fmt.Fprintln(os.Stderr, "自动挂载失败（可在管理界面修正后重试）:", err)
-		}
+		mctx, mcancel := context.WithTimeout(ctx, 300*time.Second)
+		s.MountAll(mctx)
 		mcancel()
 	} else {
 		s.Logf("配置为不自动挂载，等待管理界面操作")
@@ -398,8 +412,12 @@ func run(cfgPath string) int {
 	sigReceived := <-sig
 	s.Logf("收到信号 %s，正在退出", sigReceived)
 
-	if err := s.Unmount(); err != nil {
-		s.Logf("卸载失败: %v", err)
+	for _, row := range s.AccountsView() {
+		if id, ok := row["id"].(string); ok {
+			if err := s.UnmountOf(id); err != nil {
+				s.Logf("卸载账号 %s 失败: %v", row["name"], err)
+			}
+		}
 	}
 	return 0
 }

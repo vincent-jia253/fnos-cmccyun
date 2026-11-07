@@ -315,69 +315,133 @@ func ensureMountDir(path string) error {
 // 只有 Update()（直接改配置、不换挂载）才需要禁止它，因此单独用 allowInside=false 走一遍。
 //
 // 不带后缀的版本自己取锁；Update 那条路径已经持锁，必须用 ...Locked 版本。
-func (s *Service) validateMountPath(p string) error {
-	return s.validateMountPathOpt(p, false)
-}
+// validateMountPath 是默认账号版本的语法校验（CLI 与测试用）。
+func (s *Service) validateMountPath(p string) error { return s.validateMountPathOpt("", p, false) }
 
 func (s *Service) validateMountPathLocked(p string) error {
-	return s.validateMountPathOptLocked(p, false)
+	return s.validateMountPathOptLocked("", p, false)
+}
+
+func (s *Service) validateMountPathOf(id, p string) error {
+	return s.validateMountPathOpt(id, p, false)
+}
+
+func (s *Service) validateMountPathLockedOf(id, p string) error {
+	return s.validateMountPathOptLocked(id, p, false)
 }
 
 // validateMountPathOpt: allowInside=true 时允许目标位于当前挂载点内部。
-func (s *Service) validateMountPathOpt(p string, allowInside bool) error {
+func (s *Service) validateMountPathOpt(id, p string, allowInside bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.validateMountPathOptLocked(p, allowInside)
+	return s.validateMountPathOptLocked(id, p, allowInside)
 }
 
-// validateMountPathOptLocked 要求调用者已持有 s.mu（只读 s.cfg 与 s.mountedAt）。
-func (s *Service) validateMountPathOptLocked(p string, allowInside bool) error {
+// validateMountPathOptLocked 要求调用者已持有 s.mu（只读 s.cfg 与账号运行态）。
+func (s *Service) validateMountPathOptLocked(id, p string, allowInside bool) error {
 	if strings.TrimSpace(p) == "" {
 		return nil // 允许清空
 	}
+	n, err := checkMountPathShape(p)
+	if err != nil {
+		return err
+	}
+	ac, ok := s.cfg.AccountByID(id)
+	if !ok {
+		return fmt.Errorf("账号不存在：%s", id)
+	}
+	return s.mountPathConflictLocked(ac.ID, n, allowInside)
+}
+
+// checkMountPathShape 只做「形状」检查：绝对路径、不是根、不是卷根、在存储卷里。
+// 新增账号时账号还不在配置里，这时候只能查形状和冲突，查不了「当前挂载点」。
+func checkMountPathShape(p string) (string, error) {
 	if !filepath.IsAbs(strings.TrimSpace(p)) {
-		return fmt.Errorf("挂载位置要填绝对路径，例如 /vol4/1000/移动云盘（当前：%s）", strings.TrimSpace(p))
+		return "", fmt.Errorf("挂载位置要填绝对路径，例如 /vol4/1000/移动云盘（当前：%s）", strings.TrimSpace(p))
 	}
 	n := normMountPath(p)
 	if n == "/" {
-		return fmt.Errorf("不能挂在根目录")
+		return "", fmt.Errorf("不能挂在根目录")
 	}
 	if IsVolumeRoot(n) {
-		return fmt.Errorf("不能直接挂在存储卷根目录（%s）：那样会遮住卷里已有的目录，请在其下选一个目录", n)
+		return "", fmt.Errorf("不能直接挂在存储卷根目录（%s）：那样会遮住卷里已有的目录，请在其下选一个目录", n)
 	}
 	if !underAnyRoot(n) {
 		roots := strings.Join(VolumeRoots(), "、")
 		if roots == "" {
 			roots = "/vol1 … /vol99"
 		}
-		return fmt.Errorf("只能选择飞牛存储卷下的位置（%s），当前：%s", roots, n)
+		return "", fmt.Errorf("只能选择飞牛存储卷下的位置（%s），当前：%s", roots, n)
 	}
+	return n, nil
+}
+
+// validateMountPathForNewLocked 校验一个还不存在的账号（新增时）的挂载位置。
+func (s *Service) validateMountPathForNewLocked(p string) error {
+	if strings.TrimSpace(p) == "" {
+		return fmt.Errorf("挂载位置不能为空：新增账号时要一起指定挂到哪")
+	}
+	n, err := checkMountPathShape(p)
+	if err != nil {
+		return err
+	}
+	return s.mountPathConflictLocked("", n, false)
+}
+
+// mountPathConflictLocked 查「和现有挂载 / 其它账号」的冲突。selfID 可以是空
+// （新增账号），此时跳过「当前挂载点」这一条。
+func (s *Service) mountPathConflictLocked(selfID, n string, allowInside bool) error {
 	// 判断依据是「实际挂着的那里」，不是配置里写的目标位置。
 	// 这里读的是 mountedAt/cfg，所以只允许用 ...Locked 版本（本函数要求持锁）。
-	if cur := s.curMountPointLocked(); cur != "" && !allowInside && n != cur && underRoot(n, cur) {
-		return fmt.Errorf("不能直接把配置改成当前挂载点（%s）内部——那样旧挂载会变成看不见的僵尸。要用「挂到这里」按钮切换，它会先卸下旧位置再挂", cur)
+	if selfID != "" {
+		if ac, ok := s.cfg.AccountByID(selfID); ok {
+			if cur := s.curMountPointLocked(ac); cur != "" && !allowInside && n != cur && underRoot(n, cur) {
+				return fmt.Errorf("不能直接把配置改成当前挂载点（%s）内部——那样旧挂载会变成看不见的僵尸。要用「挂到这里」按钮切换，它会先卸下旧位置再挂", cur)
+			}
+		}
+	}
+	// 多账号：两个账号的挂载点不能互相包含（否则谁也卸不干净）。
+	for i := range s.cfg.Accounts {
+		other := &s.cfg.Accounts[i]
+		if other.ID == selfID || other.MountPoint == "" {
+			continue
+		}
+		if config.PathsOverlap(n, other.MountPoint) {
+			return fmt.Errorf("%s 和账号「%s」的挂载点（%s）重叠了：两台云盘不能挂在互相包含的目录里", n, other.DisplayName(), other.MountPoint)
+		}
 	}
 	return nil
 }
 
 // CheckMountPath 校验一个候选挂载位置。它只读，不会创建或挂载任何东西。
 func (s *Service) CheckMountPath(path string, allowNonEmpty bool) (*MountPointInfo, error) {
-	return s.checkMountPath(s.Config(), path, allowNonEmpty)
+	return s.CheckMountPathOf("", path, allowNonEmpty)
 }
 
-func (s *Service) checkMountPath(cfg config.Config, path string, allowNonEmpty bool) (*MountPointInfo, error) {
+// CheckMountPathOf 按指定账号校验候选挂载位置。
+func (s *Service) CheckMountPathOf(id, path string, allowNonEmpty bool) (*MountPointInfo, error) {
+	return s.checkMountPath(id, path, allowNonEmpty)
+}
+
+func (s *Service) checkMountPath(id, path string, allowNonEmpty bool) (*MountPointInfo, error) {
+	cfgV := s.Config()
+	cfg := &cfgV
+	ac, ok := cfg.AccountByID(id)
+	if !ok {
+		return nil, fmt.Errorf("账号不存在：%s", id)
+	}
 	p := normMountPath(path)
 	if p == "" {
-		if err := s.validateMountPathOpt(p, false); err != nil {
+		if err := s.validateMountPathOpt(ac.ID, p, false); err != nil {
 			return nil, err
 		}
 		return nil, fmt.Errorf("请先选择挂载位置")
 	}
 	// 目标在「当前挂载点」里面？它的真身被挂载遮着，现在看到的是云盘内容，
 	// 所以既不能 stat 也不能判定是否非空——挂载时先卸下再看（见 SetMountPoint）。
-	curMount := s.curMountPoint()
+	curMount := s.curMountPointOf(ac.ID)
 	masked := curMount != "" && p != curMount && underRoot(p, curMount)
-	if err := s.validateMountPathOpt(p, masked); err != nil {
+	if err := s.validateMountPathOpt(ac.ID, p, masked); err != nil {
 		return nil, err
 	}
 	info := &MountPointInfo{Path: p, Parent: filepath.Dir(p), SystemDir: false, Masked: masked}
@@ -396,8 +460,8 @@ func (s *Service) checkMountPath(cfg config.Config, path string, allowNonEmpty b
 	}
 
 	// 就是想挂回当前位置：直接告知已挂载，后面按重新挂载处理。
-	cur := filepath.Clean(cfg.MountPoint)
-	if cfg.MountPoint != "" && p == cur {
+	cur := filepath.Clean(ac.MountPoint)
+	if ac.MountPoint != "" && p == cur {
 		info.Exists = true
 		info.IsMount = vfs.IsMountPoint(p)
 		info.MountType = "fuse.cmccyun"
@@ -574,6 +638,11 @@ func (s *Service) BrowseDirs(path string) (string, string, []DirEntry, error) {
 
 // CreateMountDir 在 parent 下新建一个目录（位置选择器里的「新建文件夹」）。
 func (s *Service) CreateMountDir(parent, name string) (string, error) {
+	return s.CreateMountDirOf("", parent, name)
+}
+
+// CreateMountDirOf 按指定账号判断「父目录是否被这台云盘的挂载遮着」。
+func (s *Service) CreateMountDirOf(id, parent, name string) (string, error) {
 	p := normMountPath(parent)
 	if !underAnyRoot(p) {
 		return "", fmt.Errorf("只能建在飞牛存储卷下（%s）", strings.Join(VolumeRoots(), "、"))
@@ -585,7 +654,7 @@ func (s *Service) CreateMountDir(parent, name string) (string, error) {
 	// 父目录在当前挂载点里面（含挂载点本身）：这里的写入会落到云盘上
 	// （只读挂载则直接失败），也会被挂载遮住看不见。真实目录只有卸下后才动得了，
 	// 所以让「挂到这里」去处理（它会先在卸载窗口里建好目录）。
-	if cur := s.curMountPoint(); cur != "" && underRoot(p, cur) {
+	if cur := s.curMountPointOf(id); cur != "" && underRoot(p, cur) {
 		return "", fmt.Errorf("%s 在当前挂载点（%s）里面：在这里新建会建到云盘上或被遮住。别用新建，直接点「挂到这里」，它会先卸下原位置、再建好真实目录并挂上", p, cur)
 	}
 	if strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
@@ -616,7 +685,12 @@ type SetMountPointOptions struct {
 // SetMountPoint 把云盘换挂到 path：先校验、必要时建目录，然后落配置并重新挂载；
 // 挂载失败会把配置（和新目录属主）回滚到原样，并尽力挂回旧位置。
 func (s *Service) SetMountPoint(ctx context.Context, path string, opt SetMountPointOptions) error {
-	info, err := s.CheckMountPath(path, opt.AllowNonEmpty)
+	return s.SetMountPointOf("", ctx, path, opt)
+}
+
+// SetMountPointOf 把指定账号换挂到 path。
+func (s *Service) SetMountPointOf(id string, ctx context.Context, path string, opt SetMountPointOptions) error {
+	info, err := s.CheckMountPathOf(id, path, opt.AllowNonEmpty)
 	if err != nil {
 		return err
 	}
@@ -625,16 +699,16 @@ func (s *Service) SetMountPoint(ctx context.Context, path string, opt SetMountPo
 	// 才能看到 / 创建真实目录——不然目录会被建到云盘里，或者因只读直接失败。
 	unmounted := false
 	if info.Masked {
-		old := s.curMountPoint()
+		old := s.curMountPointOf(id)
 		s.logf("目标 %s 在当前挂载点 %s 里面，先卸下再核对真实目录", info.Path, old)
-		if err := s.Unmount(); err != nil {
+		if err := s.UnmountOf(id); err != nil {
 			return fmt.Errorf("要先卸下当前挂载点 %s 才能挂到它里面，卸载失败：%w", old, err)
 		}
 		unmounted = true
 		var cerr error
-		info, cerr = s.CheckMountPath(path, opt.AllowNonEmpty)
+		info, cerr = s.CheckMountPathOf(id, path, opt.AllowNonEmpty)
 		if cerr != nil {
-			if rerr := s.Remount(ctx); rerr != nil {
+			if rerr := s.RemountOf(ctx, id); rerr != nil {
 				return fmt.Errorf("目标位置不可用（%v），且原位置 %s 没能挂回去：%v", cerr, old, rerr)
 			}
 			return fmt.Errorf("目标位置不可用：%w（原位置 %s 已挂回）", cerr, old)
@@ -643,7 +717,7 @@ func (s *Service) SetMountPoint(ctx context.Context, path string, opt SetMountPo
 	if !info.Exists {
 		if !opt.Create {
 			if unmounted {
-				if rerr := s.Remount(ctx); rerr != nil {
+				if rerr := s.RemountOf(ctx, id); rerr != nil {
 					return fmt.Errorf("目录不存在：%s（可勾选「目录不存在时自动创建」），且原位置没能挂回去：%v", info.Path, rerr)
 				}
 			}
@@ -651,7 +725,7 @@ func (s *Service) SetMountPoint(ctx context.Context, path string, opt SetMountPo
 		}
 		if err := ensureMountDir(info.Path); err != nil {
 			if unmounted {
-				if rerr := s.Remount(ctx); rerr != nil {
+				if rerr := s.RemountOf(ctx, id); rerr != nil {
 					s.logf("创建目录失败后，原位置没能挂回：%v", rerr)
 				}
 			}
@@ -662,14 +736,16 @@ func (s *Service) SetMountPoint(ctx context.Context, path string, opt SetMountPo
 
 	// 先把旧位置卸干净，再改配置：卸载要按「原来的挂载点」进行，所以必须发生在
 	// 改 s.cfg / 落盘之前，否则旧挂载会被漏掉（切换挂载点最经典的坑）。
-	if err := s.Unmount(); err != nil {
+	if err := s.UnmountOf(id); err != nil {
 		return fmt.Errorf("原位置卸载失败，请先关掉正在使用它的程序再试：%w", err)
 	}
 
 	s.mu.Lock()
-	before := *s.cfg
-	s.cfg.MountPoint = info.Path
-	s.cfg.AllowNonEmpty = opt.AllowNonEmpty
+	beforeGlob := *s.cfg
+	ac2, _ := s.cfg.AccountByID(id)
+	before := *ac2
+	ac2.MountPoint = info.Path
+	ac2.AllowNonEmpty = opt.AllowNonEmpty
 	if opt.FollowOwner {
 		s.cfg.UID, s.cfg.GID = info.SuggestUID, info.SuggestGID
 	}
@@ -685,21 +761,23 @@ func (s *Service) SetMountPoint(ctx context.Context, path string, opt SetMountPo
 		return fmt.Errorf("保存配置失败: %w", err)
 	}
 
-	if err := s.Remount(ctx); err != nil {
+	if err := s.RemountOf(ctx, id); err != nil {
 		// 回滚配置并尝试挂回原位置，避免留下「配置指向新位置但实际没挂上」的状态。
 		s.mu.Lock()
-		s.cfg.MountPoint, s.cfg.AllowNonEmpty = before.MountPoint, before.AllowNonEmpty
-		s.cfg.UID, s.cfg.GID = before.UID, before.GID
+		if ac3, ok := s.cfg.AccountByID(id); ok {
+			ac3.MountPoint, ac3.AllowNonEmpty = before.MountPoint, before.AllowNonEmpty
+		}
+		s.cfg.UID, s.cfg.GID = beforeGlob.UID, beforeGlob.GID
 		_ = config.Save(s.cfgPath, s.cfg)
 		old := before.MountPoint
 		s.mu.Unlock()
 		if old == "" {
 			return fmt.Errorf("挂载到 %s 失败（已回滚配置）：%w", info.Path, err)
 		}
-		if uerr := s.Unmount(); uerr != nil {
+		if uerr := s.UnmountOf(id); uerr != nil {
 			s.logf("回滚前卸载 %s 失败: %v", info.Path, uerr)
 		}
-		if rerr := s.Remount(ctx); rerr != nil {
+		if rerr := s.RemountOf(ctx, id); rerr != nil {
 			return fmt.Errorf("挂载到 %s 失败，且旧位置 %s 也没能挂回：%v / %v", info.Path, old, err, rerr)
 		}
 		return fmt.Errorf("挂载到 %s 失败，已挂回原位置 %s：%v", info.Path, old, err)

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,28 +44,56 @@ type StrmPairResult struct {
 }
 
 // strmStatePath 每条映射一个快照文件（放在配置目录里，不污染媒体库）。
-func (s *Service) strmStatePath(p config.StrmPair) string {
-	sum := sha1.Sum([]byte(p.Cloud + "|" + p.Local))
+// 多账号下把账号 ID 也算进哈希，两台云盘的同一路径互不干扰。
+func (s *Service) strmStatePath(id string, p config.StrmPair) string {
+	sum := sha1.Sum([]byte(id + "|" + p.Cloud + "|" + p.Local))
 	return filepath.Join(filepath.Dir(s.cfgPath), "strm-state", hex.EncodeToString(sum[:6])+".json")
+}
+
+// migrateLegacyStrmState 把 v1.6 的快照文件改名成带账号 ID 的新名字。
+// 不做这一步的话，升级后第一次扫描会因为「找不到旧快照」把所有 .strm 当新增
+// 重写一遍——内容一模一样，但 mtime 全变，媒体库白白整库重扫一次。
+func (s *Service) migrateLegacyStrmState(id string, p config.StrmPair) {
+	if id != "" && id != config.DefaultAccountID {
+		return
+	}
+	cur := s.strmStatePath(id, p)
+	if _, err := os.Stat(cur); err == nil {
+		return // 已经是新名字（或这台账号扫过一轮了）
+	}
+	sum := sha1.Sum([]byte(p.Cloud + "|" + p.Local))
+	legacy := filepath.Join(filepath.Dir(s.cfgPath), "strm-state", hex.EncodeToString(sum[:6])+".json")
+	if _, err := os.Stat(legacy); err != nil {
+		return
+	}
+	if err := os.Rename(legacy, cur); err != nil {
+		s.logf("迁移 STRM 快照 %s 失败（本轮会把该映射当首次扫描）：%v", legacy, err)
+		return
+	}
+	s.logf("已把 STRM 快照从旧命名迁移到 %s，本轮不会重写未变动的 .strm", filepath.Base(cur))
 }
 
 // strmPlayURL 是 url 模式写进 .strm 的直链前缀。
 // 取第一个内网地址：媒体服务一般和本应用在同一台机器/同一网段。
-func (s *Service) strmPlayURL(cfg config.Config) string {
+func (s *Service) strmPlayURL(cfg config.Config, id string) string {
 	host := "127.0.0.1"
 	if ips := localIPv4(); len(ips) > 0 {
 		host = ips[0]
+	}
+	// a= 带上账号，播放时才知道该用哪台云盘的授权和口令。
+	if id != "" {
+		return fmt.Sprintf("http://%s:%d/api/strm/play?a=%s", host, cfg.WebPort, url.QueryEscape(id))
 	}
 	return fmt.Sprintf("http://%s:%d/api/strm/play", host, cfg.WebPort)
 }
 
 // strmMode 决定这次用哪种内容形式：auto 时挂载在线用 path，否则退回 url。
-func strmMode(cfg config.Config) string {
-	switch cfg.StrmMode {
+func strmMode(ac config.AccountConfig) string {
+	switch ac.StrmMode {
 	case "path", "url":
-		return cfg.StrmMode
+		return ac.StrmMode
 	}
-	if cfg.MountPoint != "" && vfs.IsMountPoint(cfg.MountPoint) {
+	if ac.MountPoint != "" && vfs.IsMountPoint(ac.MountPoint) {
 		return "path"
 	}
 	return "url"
@@ -124,24 +153,28 @@ func strmMountPrefix(mountPoint, cloudPath string) string {
 	return filepath.Join(mountPoint, filepath.FromSlash(rel))
 }
 
-func (s *Service) runStrm(ctx context.Context) ([]StrmPairResult, error) {
+func (s *Service) runStrm(ctx context.Context, id string) ([]StrmPairResult, error) {
 	cfg := s.Config()
-	if !cfg.StrmEnabled {
+	ac, ok := cfg.AccountByID(id)
+	if !ok {
+		return nil, fmt.Errorf("账号不存在：%s", id)
+	}
+	if !ac.StrmEnabled {
 		return nil, fmt.Errorf("STRM 未启用")
 	}
-	if len(cfg.StrmPairs) == 0 {
+	if len(ac.StrmPairs) == 0 {
 		return nil, fmt.Errorf("还没有配置「云端目录 → 本地目录」映射")
 	}
-	c, err := s.connect(ctx)
+	c, err := s.connect(ctx, ac.ID)
 	if err != nil {
 		return nil, err
 	}
-	mode := strmMode(cfg)
-	urlBase := s.strmPlayURL(cfg)
-	exts := splitExts(cfg.StrmExt)
+	mode := strmMode(*ac)
+	urlBase := s.strmPlayURL(cfg, ac.ID)
+	exts := splitExts(ac.StrmExt)
 
 	var out []StrmPairResult
-	for _, pair := range cfg.StrmPairs {
+	for _, pair := range ac.StrmPairs {
 		pr := StrmPairResult{Cloud: pair.Cloud, Local: pair.Local}
 		start := time.Now()
 		rootID, err := resolveCloudPath(ctx, c, pair.Cloud)
@@ -161,8 +194,9 @@ func (s *Service) runStrm(ctx context.Context) ([]StrmPairResult, error) {
 		// path 模式：strm 里要写「挂载点 + 云端路径 + 相对路径」。
 		// 只拼挂载点是不够的——映射的是云盘子目录，少拼这一段媒体库就找不到文件
 		// （真机第一轮就踩到了：内容指向 /vol4/1000/移动云盘/学爸…）。
-		mountPrefix := strmMountPrefix(cfg.MountPoint, pair.Cloud)
-		statePath := s.strmStatePath(pair)
+		mountPrefix := strmMountPrefix(ac.MountPoint, pair.Cloud)
+		s.migrateLegacyStrmState(ac.ID, pair)
+		statePath := s.strmStatePath(ac.ID, pair)
 		prev := strm.LoadState(statePath)
 		o := strm.Options{
 			Backend:       c,
@@ -171,9 +205,9 @@ func (s *Service) runStrm(ctx context.Context) ([]StrmPairResult, error) {
 			Mode:          mode,
 			MountPrefix:   mountPrefix,
 			URLBase:       urlBase,
-			Token:         cfg.StrmToken,
+			Token:         ac.StrmToken,
 			Exts:          exts,
-			DeleteMissing: cfg.StrmDeleteMissing,
+			DeleteMissing: ac.StrmDeleteMissing,
 			Logf:          s.logf,
 		}
 		st, res, err := strm.Run(ctx, o, prev)
@@ -197,27 +231,33 @@ func (s *Service) runStrm(ctx context.Context) ([]StrmPairResult, error) {
 }
 
 // StrmScan 触发一次扫描（控制台的「立即扫描」和后台定时都走这里）。
-func (s *Service) StrmScan(ctx context.Context) ([]StrmPairResult, error) {
-	s.strmMu.Lock()
-	if s.strmRunning {
-		s.strmMu.Unlock()
+func (s *Service) StrmScan(ctx context.Context, id string) ([]StrmPairResult, error) {
+	s.mu.Lock()
+	a, ac, err := s.acctLocked(id)
+	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	a.strmMu.Lock()
+	if a.strmRunning {
+		a.strmMu.Unlock()
 		return nil, fmt.Errorf("上一轮扫描还没结束，稍等一下")
 	}
-	s.strmRunning = true
-	s.strmMu.Unlock()
+	a.strmRunning = true
+	a.strmMu.Unlock()
 
-	res, err := s.runStrm(ctx)
+	res, err := s.runStrm(ctx, ac.ID)
 
-	s.strmMu.Lock()
-	s.strmRunning = false
-	s.strmLastAt = time.Now()
-	s.strmLast = res
+	a.strmMu.Lock()
+	a.strmRunning = false
+	a.strmLastAt = time.Now()
+	a.strmLast = res
 	if err != nil {
-		s.strmLastErr = err.Error()
+		a.strmLastErr = err.Error()
 	} else {
-		s.strmLastErr = ""
+		a.strmLastErr = ""
 	}
-	s.strmMu.Unlock()
+	a.strmMu.Unlock()
 	return res, err
 }
 
@@ -227,10 +267,14 @@ func (s *Service) StrmLoop(ctx context.Context) {
 	tick := time.NewTicker(30 * time.Second)
 	defer tick.Stop()
 	for {
-		if s.strmDue() {
+		// 多账号：每台云盘各自按自己的间隔判定，互不影响。
+		for _, ac := range s.Config().Accounts {
+			if !s.strmDue(ac.ID) {
+				continue
+			}
 			sctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
-			if _, err := s.StrmScan(sctx); err != nil {
-				s.logf("STRM：定时扫描失败：%v", err)
+			if _, err := s.StrmScan(sctx, ac.ID); err != nil {
+				s.logf("STRM：定时扫描失败（账号 %s）：%v", ac.DisplayName(), err)
 			}
 			cancel()
 		}
@@ -243,32 +287,49 @@ func (s *Service) StrmLoop(ctx context.Context) {
 }
 
 // strmDue 判断这一轮该不该扫。
-func (s *Service) strmDue() bool {
+func (s *Service) strmDue(id string) bool {
 	cfg := s.Config()
-	if !cfg.StrmEnabled || len(cfg.StrmPairs) == 0 {
+	ac, ok := cfg.AccountByID(id)
+	if !ok || !ac.StrmEnabled || len(ac.StrmPairs) == 0 {
 		return false
 	}
-	iv := time.Duration(cfg.StrmIntervalMin) * time.Minute
+	iv := time.Duration(ac.StrmIntervalMin) * time.Minute
 	if iv <= 0 {
 		iv = 5 * time.Minute
 	}
-	s.strmMu.Lock()
-	defer s.strmMu.Unlock()
-	if s.strmRunning {
+	s.mu.Lock()
+	a, _, err := s.acctLocked(ac.ID)
+	s.mu.Unlock()
+	if err != nil {
 		return false
 	}
-	return s.strmLastAt.IsZero() || time.Since(s.strmLastAt) >= iv
+	a.strmMu.Lock()
+	defer a.strmMu.Unlock()
+	if a.strmRunning {
+		return false
+	}
+	return a.strmLastAt.IsZero() || time.Since(a.strmLastAt) >= iv
 }
 
 // StrmStatus 给控制台用：配置 + 上一轮结果 + 当前模式/挂载状态。
-func (s *Service) StrmStatus() map[string]any {
+func (s *Service) StrmStatus(id string) map[string]any {
 	cfg := s.Config()
-	s.strmMu.Lock()
-	running, lastAt, lastErr, last := s.strmRunning, s.strmLastAt, s.strmLastErr, s.strmLast
-	s.strmMu.Unlock()
+	ac, ok := cfg.AccountByID(id)
+	if !ok {
+		return map[string]any{"enabled": false, "pairs": []map[string]any{}}
+	}
+	s.mu.Lock()
+	a, _, err := s.acctLocked(ac.ID)
+	s.mu.Unlock()
+	if err != nil {
+		return map[string]any{"enabled": false, "pairs": []map[string]any{}}
+	}
+	a.strmMu.Lock()
+	running, lastAt, lastErr, last := a.strmRunning, a.strmLastAt, a.strmLastErr, a.strmLast
+	a.strmMu.Unlock()
 
-	pairs := make([]map[string]any, 0, len(cfg.StrmPairs))
-	for _, p := range cfg.StrmPairs {
+	pairs := make([]map[string]any, 0, len(ac.StrmPairs))
+	for _, p := range ac.StrmPairs {
 		info := map[string]any{"cloud": p.Cloud, "local": p.Local, "exists": false, "strm_count": 0}
 		if st, err := os.Stat(p.Local); err == nil && st.IsDir() {
 			info["exists"] = true
@@ -277,18 +338,20 @@ func (s *Service) StrmStatus() map[string]any {
 		pairs = append(pairs, info)
 	}
 	out := map[string]any{
-		"enabled":        cfg.StrmEnabled,
+		"account":        ac.ID,
+		"enabled":        ac.StrmEnabled,
 		"running":        running,
-		"mode":           strmMode(cfg),
-		"mode_setting":   cfg.StrmMode,
-		"interval_min":   cfg.StrmIntervalMin,
-		"ext":            cfg.StrmExt,
-		"delete_missing": cfg.StrmDeleteMissing,
-		"token_set":      cfg.StrmToken != "",
+		"mode":           strmMode(*ac),
+		"mode_setting":   ac.StrmMode,
+		"interval_min":   ac.StrmIntervalMin,
+		"ext":            ac.StrmExt,
+		"delete_missing": ac.StrmDeleteMissing,
+		"token_set":      ac.StrmToken != "",
+		"token":          ac.StrmToken,
 		"pairs":          pairs,
-		"mount_point":    cfg.MountPoint,
-		"mount_ready":    cfg.MountPoint != "" && vfs.IsMountPoint(cfg.MountPoint),
-		"play_url":       s.strmPlayURL(cfg),
+		"mount_point":    ac.MountPoint,
+		"mount_ready":    ac.MountPoint != "" && vfs.IsMountPoint(ac.MountPoint),
+		"play_url":       s.strmPlayURL(cfg, ac.ID),
 		"last_error":     lastErr,
 	}
 	if !lastAt.IsZero() {
@@ -322,10 +385,16 @@ func countStrm(root string) int {
 }
 
 // SetStrm 应用控制台的补丁。
-func (s *Service) SetStrm(patch map[string]any) (map[string]any, error) {
+func (s *Service) SetStrm(id string, patch map[string]any) (map[string]any, error) {
 	s.mu.Lock()
-	cfg := *s.cfg
+	cur, ok := s.cfg.AccountByID(id)
+	if !ok {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("账号不存在：%s", id)
+	}
+	cfg := *cur
 	mountPoint := cfg.MountPoint
+	id = cfg.ID
 	s.mu.Unlock()
 
 	if v, ok := patch["enabled"].(bool); ok {
@@ -393,20 +462,22 @@ func (s *Service) SetStrm(patch map[string]any) (map[string]any, error) {
 
 	s.mu.Lock()
 	// 只覆盖 STRM 相关字段，别把并发改的其它设置（比如挂载点）冲掉。
-	s.cfg.StrmEnabled = cfg.StrmEnabled
-	s.cfg.StrmPairs = cfg.StrmPairs
-	s.cfg.StrmMode = cfg.StrmMode
-	s.cfg.StrmExt = cfg.StrmExt
-	s.cfg.StrmIntervalMin = cfg.StrmIntervalMin
-	s.cfg.StrmDeleteMissing = cfg.StrmDeleteMissing
-	s.cfg.StrmToken = cfg.StrmToken
+	if dst, ok := s.cfg.AccountByID(id); ok {
+		dst.StrmEnabled = cfg.StrmEnabled
+		dst.StrmPairs = cfg.StrmPairs
+		dst.StrmMode = cfg.StrmMode
+		dst.StrmExt = cfg.StrmExt
+		dst.StrmIntervalMin = cfg.StrmIntervalMin
+		dst.StrmDeleteMissing = cfg.StrmDeleteMissing
+		dst.StrmToken = cfg.StrmToken
+	}
 	snapshot := *s.cfg
 	s.mu.Unlock()
 
 	if err := config.Save(s.cfgPath, &snapshot); err != nil {
 		return nil, err
 	}
-	return s.StrmStatus(), nil
+	return s.StrmStatus(id), nil
 }
 
 // splitExts 把 "mp4, mkv" 拆成白名单；空表示用内置列表。
@@ -434,7 +505,7 @@ func displayCloud(p string) string {
 // registerStrmRoutes 挂控制台接口和播放直链。
 func (s *Service) registerStrmRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/strm/status", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{"ok": true, "strm": s.StrmStatus(), "config": s.MaskPtr()})
+		writeJSON(w, map[string]any{"ok": true, "strm": s.StrmStatus(accID(r)), "config": s.MaskPtrFor(accID(r))})
 	})
 
 	mux.HandleFunc("/api/strm/config", func(w http.ResponseWriter, r *http.Request) {
@@ -447,12 +518,16 @@ func (s *Service) registerStrmRoutes(mux *http.ServeMux) {
 			writeErr(w, "请求格式错误: "+err.Error())
 			return
 		}
-		st, err := s.SetStrm(patch)
+		aid := accID(r)
+		if v, ok := patch["account"].(string); ok && v != "" {
+			aid = v
+		}
+		st, err := s.SetStrm(aid, patch)
 		if err != nil {
 			writeErr(w, err.Error())
 			return
 		}
-		writeJSON(w, map[string]any{"ok": true, "strm": st, "config": s.MaskPtr()})
+		writeJSON(w, map[string]any{"ok": true, "strm": st, "config": s.MaskPtrFor(aid)})
 	})
 
 	mux.HandleFunc("/api/strm/scan", func(w http.ResponseWriter, r *http.Request) {
@@ -462,19 +537,28 @@ func (s *Service) registerStrmRoutes(mux *http.ServeMux) {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
 		defer cancel()
-		res, err := s.StrmScan(ctx)
+		aid := accID(r)
+		res, err := s.StrmScan(ctx, aid)
 		if err != nil {
-			writeJSON(w, map[string]any{"ok": false, "error": err.Error(), "strm": s.StrmStatus(), "results": res})
+			writeJSON(w, map[string]any{"ok": false, "error": err.Error(), "strm": s.StrmStatus(aid), "results": res})
 			return
 		}
-		writeJSON(w, map[string]any{"ok": true, "strm": s.StrmStatus(), "results": res})
+		writeJSON(w, map[string]any{"ok": true, "strm": s.StrmStatus(aid), "results": res})
 	})
 
 	// /api/strm/play 是写进 .strm 的直链：校验 k= 口令后 302 到云盘 CDN。
 	// 走 302 而不是本机转发，是因为播放器（影视/Emby）拉 4K 时不该经过我们。
 	mux.HandleFunc("/api/strm/play", func(w http.ResponseWriter, r *http.Request) {
 		cfg := s.Config()
-		if tok := cfg.StrmToken; tok != "" {
+		// a= 指定账号（新版 strm 里带），老 strm 没有就按默认账号处理。
+		aid := strings.TrimSpace(r.URL.Query().Get("a"))
+		ac, ok := cfg.AccountByID(aid)
+		if !ok {
+			http.Error(w, "账号不存在", http.StatusNotFound)
+			return
+		}
+		aid = ac.ID
+		if tok := ac.StrmToken; tok != "" {
 			if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("k")), []byte(tok)) != 1 {
 				http.Error(w, "口令不对", http.StatusForbidden)
 				return
@@ -485,7 +569,7 @@ func (s *Service) registerStrmRoutes(mux *http.ServeMux) {
 			http.Error(w, "缺少文件 ID", http.StatusBadRequest)
 			return
 		}
-		c, err := s.apiClient()
+		c, err := s.apiClientOf(aid)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return

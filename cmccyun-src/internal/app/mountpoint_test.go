@@ -19,7 +19,7 @@ func newMountSvc(t *testing.T, mountPoint string) (*Service, string) {
 	t.Setenv("CMCCYUN_EXTRA_ROOTS", root)
 	cfgPath := filepath.Join(root, "@appconf", "config.json")
 	cfg := config.Default()
-	cfg.MountPoint = mountPoint
+	acct0(cfg).MountPoint = mountPoint
 	cfg.StageDir = filepath.Join(root, "@appdata", "staging")
 	cfg.LogFile = filepath.Join(root, "@appdata", "cmccyun.log")
 	if err := config.Save(cfgPath, cfg); err != nil {
@@ -30,14 +30,14 @@ func newMountSvc(t *testing.T, mountPoint string) (*Service, string) {
 		t.Fatal(err)
 	}
 	if mountPoint == "" {
-		s.cfg.MountPoint = ""
+		acct0(s.cfg).MountPoint = ""
 	}
 	return s, root
 }
 
 func TestValidateMountPathRules(t *testing.T) {
 	s, root := newMountSvc(t, filepath.Join("/tmp", "cmccyun-cfgtest"))
-	s.cfg.MountPoint = filepath.Join(root, "mnt")
+	acct0(s.cfg).MountPoint = filepath.Join(root, "mnt")
 
 	cases := []struct {
 		path string
@@ -83,7 +83,7 @@ func TestMountPointInsideLiveMount(t *testing.T) {
 	if err := os.MkdirAll(cur, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s.cfg.MountPoint = cur
+	acct0(s.cfg).MountPoint = cur
 
 	// 没有活挂载（mountedAt 为空且 cur 不是挂载点）：允许，按普通目录处理。
 	info, err := s.CheckMountPath(inner, false)
@@ -95,7 +95,7 @@ func TestMountPointInsideLiveMount(t *testing.T) {
 	}
 
 	// 模拟「真的挂着」：mountedAt 就是运行时的依据。
-	s.mountedAt = cur
+	setMountedAt(s, cur)
 
 	// 直接改配置到挂载点内部：必须拒绝（会留下僵尸挂载），并指向「挂到这里」。
 	err = s.validateMountPath(inner)
@@ -351,7 +351,7 @@ func TestSetMountPointMovesMount(t *testing.T) {
 	if !vfs.IsMountPoint(old) {
 		t.Fatal("旧位置没挂上")
 	}
-	if got := s.Config().MountPoint; got != old {
+	if got := acctView(s.Config()).MountPoint; got != old {
 		t.Fatalf("配置里的挂载点 = %s, 期望 %s", got, old)
 	}
 
@@ -369,8 +369,8 @@ func TestSetMountPointMovesMount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if onDisk.MountPoint != newDir {
-		t.Fatalf("磁盘上的挂载点 = %s, 期望 %s", onDisk.MountPoint, newDir)
+	if acctView(*onDisk).MountPoint != newDir {
+		t.Fatalf("磁盘上的挂载点 = %s, 期望 %s", acctView(*onDisk).MountPoint, newDir)
 	}
 	if onDisk.UID != uint32(os.Getuid()) {
 		t.Fatalf("FollowOwner 没把属主写进配置: %d", onDisk.UID)
@@ -393,7 +393,7 @@ func TestSetMountPointMovesMount(t *testing.T) {
 	if !vfs.IsMountPoint(newDir) {
 		t.Fatal("失败的切换把原有挂载弄丢了")
 	}
-	if got := s.Config().MountPoint; got != newDir {
+	if got := acctView(s.Config()).MountPoint; got != newDir {
 		t.Fatalf("失败后配置没回滚: %s", got)
 	}
 	if data, err := os.ReadFile(filepath.Join(bad, "keep.txt")); err != nil || string(data) != "keep" {
@@ -451,8 +451,8 @@ func TestSetMountPointMovesOutOfLiveMount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if onDisk.MountPoint != inner {
-		t.Fatalf("磁盘上的挂载点 = %s, 期望 %s", onDisk.MountPoint, inner)
+	if acctView(*onDisk).MountPoint != inner {
+		t.Fatalf("磁盘上的挂载点 = %s, 期望 %s", acctView(*onDisk).MountPoint, inner)
 	}
 }
 
@@ -461,8 +461,8 @@ func TestSetMountPointMovesOutOfLiveMount(t *testing.T) {
 func TestMountedAtStateFile(t *testing.T) {
 	s, root := newMountSvc(t, "")
 	p := filepath.Join(root, "1000", "移动云盘")
-	s.saveMountedAt(p)
-	if got := s.loadMountedAt(); got != p {
+	s.saveMountedAt("", p)
+	if got := s.loadMountedAt(""); got != p {
 		t.Fatalf("读回 %q, 期望 %q", got, p)
 	}
 	// 换一个实例读（模拟重启）
@@ -470,14 +470,20 @@ func TestMountedAtStateFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s2.mountedAt != p {
-		t.Fatalf("重启后没认出上次的挂载点: %q", s2.mountedAt)
+	s2.mu.Lock()
+	gotAt := ""
+	if a, _, err := s2.acctLocked(""); err == nil {
+		gotAt = a.mountedAt
 	}
-	s.saveMountedAt("")
-	if got := s.loadMountedAt(); got != "" {
+	s2.mu.Unlock()
+	if gotAt != p {
+		t.Fatalf("重启后没认出上次的挂载点: %q", gotAt)
+	}
+	s.saveMountedAt("", "")
+	if got := s.loadMountedAt(""); got != "" {
 		t.Fatalf("清空后仍读到 %q", got)
 	}
-	if _, err := os.Stat(s.mountStatePath()); !os.IsNotExist(err) {
+	if _, err := os.Stat(s.mountStatePath("")); !os.IsNotExist(err) {
 		t.Fatal("状态文件没删掉")
 	}
 }
@@ -513,7 +519,7 @@ func TestStrayMountCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.MountPoint = newLoc
+	acct0(cfg).MountPoint = newLoc
 	if err := config.Save(s.ConfigPath(), cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -522,7 +528,11 @@ func TestStrayMountCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	s2.mu.Lock()
-	got := s2.strayMountLocked(newLoc)
+	a2, _, aerr := s2.acctLocked("")
+	got := ""
+	if aerr == nil {
+		got = s2.strayMountLocked(a2, newLoc)
+	}
 	s2.mu.Unlock()
 	if got != oldLoc {
 		t.Fatalf("没认出旧挂载点: %q（旧位置是否还挂着: %v）", got, vfs.IsMountPoint(oldLoc))
@@ -537,14 +547,14 @@ func TestStrayMountCleanup(t *testing.T) {
 	if !vfs.IsMountPoint(newLoc) {
 		t.Fatal("新位置没挂上")
 	}
-	if got := s2.loadMountedAt(); got != newLoc {
+	if got := s2.loadMountedAt(""); got != newLoc {
 		t.Fatalf("mounted_at 记录的是 %q，期望 %q", got, newLoc)
 	}
 	// 卸载后状态文件应清掉
 	if err := s2.Unmount(); err != nil {
 		t.Fatal(err)
 	}
-	if got := s2.loadMountedAt(); got != "" {
+	if got := s2.loadMountedAt(""); got != "" {
 		t.Fatalf("卸载后仍有记录: %q", got)
 	}
 }

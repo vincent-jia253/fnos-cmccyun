@@ -31,13 +31,16 @@ import (
 
 // davProxy 让 webdav.Handler 手里的 FileSystem 能跟着 client 重建（换账号、
 // 重新登录后旧 FS 里的缓存要作废）。
-type davProxy struct{ s *Service }
+type davProxy struct {
+	s  *Service
+	id string
+}
 
 func (p davProxy) fs() *dav.FS {
 	s := p.s
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.davFSLocked()
+	return s.davFSLocked(p.id)
 }
 
 func (p davProxy) Mkdir(ctx context.Context, name string, perm os.FileMode) error {
@@ -80,12 +83,17 @@ func (p davProxy) Stat(ctx context.Context, name string) (os.FileInfo, error) {
 	return f.Stat(ctx, name)
 }
 
-// davFSLocked builds (or reuses) the WebDAV file system. Caller holds s.mu.
-func (s *Service) davFSLocked() *dav.FS {
-	if s.davFS != nil {
-		return s.davFS
+// davFSLocked builds (or reuses) the WebDAV file system of one account.
+// Caller holds s.mu.
+func (s *Service) davFSLocked(id string) *dav.FS {
+	a, ac, err := s.acctLocked(id)
+	if err != nil {
+		return nil
 	}
-	c, err := s.clientLocked()
+	if a.davFS != nil {
+		return a.davFS
+	}
+	c, err := s.clientLocked(a, ac)
 	if err != nil {
 		return nil
 	}
@@ -93,36 +101,50 @@ func (s *Service) davFSLocked() *dav.FS {
 	if partMB <= 0 {
 		partMB = 100
 	}
-	s.davFS = dav.New(c, dav.Options{
+	a.davFS = dav.New(c, dav.Options{
 		StageDir: s.cfg.StageDir,
 		PartSize: int64(partMB) << 20,
-		ReadOnly: s.cfg.ReadOnly,
+		ReadOnly: ac.ReadOnly,
 		Logf:     s.logf,
 	})
-	return s.davFS
+	return a.davFS
+}
+
+// davPathFor 是一台账号的 WebDAV 挂载路径：默认账号同时占据 /dav/（老地址不变）。
+func davPathFor(id string) string {
+	if id == "" || id == config.DefaultAccountID {
+		return "/dav/"
+	}
+	return "/dav/" + id + "/"
 }
 
 // davConf 是处理一个 WebDAV 请求需要的全部配置快照。
 type davConf struct {
+	id               string
 	user, pass       string
 	redirect, ro, ok bool
 }
 
-// davReady reports whether the /dav/ endpoint should answer at all.
-func (s *Service) davReady() davConf {
+// davReady reports whether the WebDAV endpoint of one account should answer.
+func (s *Service) davReady(id string) davConf {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.cfg.DAVEnabled || s.cfg.DAVPassword == "" {
+	a, ac, err := s.acctLocked(id)
+	if err != nil {
 		return davConf{}
 	}
-	if s.client == nil && s.cfg.Authorization == "" {
+	if !s.cfg.DAVEnabled || ac.DAVPassword == "" {
+		return davConf{}
+	}
+	if a.client == nil && ac.Authorization == "" {
 		return davConf{}
 	}
 	return davConf{
-		user:     s.cfg.DAVUser,
-		pass:     s.cfg.DAVPassword,
-		redirect: s.cfg.DAVRedirectOn(),
-		ro:       s.cfg.ReadOnly,
+		id:       ac.ID,
+		user:     ac.DAVUser,
+		pass:     ac.DAVPassword,
+		redirect: ac.DAVRedirectOn(),
+		ro:       ac.ReadOnly,
 		ok:       true,
 	}
 }
@@ -138,12 +160,47 @@ func davUnsafe(method string) bool {
 	return false
 }
 
+// davRouteID 从 /dav/<id>/... 里认出账号。认不出来（或者就是默认账号）时返回 ""，
+// 交给默认账号处理——这样 /dav/01影视/x.mkv 这种老地址永远有效。
+//
+// 账号是运行时可新增的，路由不能在启动时钉死，所以 /dav/ 用一个分派器。
+func (s *Service) davRouteID(p string) string {
+	rest := strings.TrimPrefix(p, "/dav")
+	rest = strings.TrimPrefix(rest, "/")
+	if rest == "" {
+		return ""
+	}
+	seg := rest
+	if i := strings.Index(seg, "/"); i >= 0 {
+		seg = seg[:i]
+	}
+	if seg == "" || seg == config.DefaultAccountID {
+		return ""
+	}
+	snap := s.Config()
+	if _, ok := snap.AccountByID(seg); ok {
+		return seg
+	}
+	return ""
+}
+
+// davDispatch 按 URL 第一段分派到对应账号（见 davRouteID）。
+func (s *Service) davDispatch() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.davHandler(s.davRouteID(r.URL.Path)).ServeHTTP(w, r)
+	})
+}
+
 // davHandler 是挂在 /dav/ 上的完整入口：BasicAuth → （可选）GET 302 到 CDN
 // → 其余交给 webdav.Handler。
-func (s *Service) davHandler() http.Handler {
+func (s *Service) davHandler(id string) http.Handler {
+	prefix := "/dav"
+	if id != "" && id != config.DefaultAccountID {
+		prefix = "/dav/" + id
+	}
 	h := &webdav.Handler{
-		Prefix:     "/dav",
-		FileSystem: davProxy{s: s},
+		Prefix:     prefix,
+		FileSystem: davProxy{s: s, id: id},
 		// 锁只在进程内有效：多个客户端并发写同一个文件时能互相排斥就够了，
 		// 云盘那边没有跨进程锁可用。
 		LockSystem: webdav.NewMemLS(),
@@ -158,7 +215,7 @@ func (s *Service) davHandler() http.Handler {
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		dc := s.davReady()
+		dc := s.davReady(id)
 		if !dc.ok {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -184,9 +241,9 @@ func (s *Service) davHandler() http.Handler {
 		// 也顺带避开本进程单连接的吞吐上限。Range 会由客户端带给 CDN
 		// （实测 CDN 返回 206，拖动进度条正常）。
 		if dc.redirect && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
-			if f := (davProxy{s: s}).fs(); f != nil {
+			if f := (davProxy{s: s, id: id}).fs(); f != nil {
 				ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-				e, err := f.Resolve(ctx, strings.TrimPrefix(r.URL.Path, "/dav"))
+				e, err := f.Resolve(ctx, strings.TrimPrefix(r.URL.Path, prefix))
 				if err == nil && !e.IsDir {
 					if u, uerr := f.DirectURL(ctx, e.ID); uerr == nil && u != "" {
 						cancel()
@@ -199,8 +256,8 @@ func (s *Service) davHandler() http.Handler {
 		}
 
 		// /dav 后面补斜杠，省得客户端把 301 当成挂载失败。
-		if r.URL.Path == "/dav" {
-			http.Redirect(w, r, "/dav/", http.StatusMovedPermanently)
+		if r.URL.Path == prefix {
+			http.Redirect(w, r, prefix+"/", http.StatusMovedPermanently)
 			return
 		}
 		h.ServeHTTP(w, r)
@@ -230,39 +287,62 @@ func newDAVPassword() string {
 
 // DAVInfo is what the console page shows: connection details plus a couple of
 // ready-to-paste examples.
-func (s *Service) DAVInfo() map[string]any {
+func (s *Service) DAVInfo(id string) map[string]any {
 	cfg := s.Config()
+	ac, ok := cfg.AccountByID(id)
+	if !ok {
+		return map[string]any{"enabled": false, "urls": []string{}}
+	}
+	path := davPathFor(ac.ID)
 	urls := make([]string, 0, 4)
 	for _, host := range localIPv4() {
-		urls = append(urls, fmt.Sprintf("http://%s:%d/dav/", host, cfg.WebPort))
+		urls = append(urls, fmt.Sprintf("http://%s:%d%s", host, cfg.WebPort, path))
 	}
 	if len(urls) == 0 {
-		urls = append(urls, fmt.Sprintf("http://127.0.0.1:%d/dav/", cfg.WebPort))
+		urls = append(urls, fmt.Sprintf("http://127.0.0.1:%d%s", cfg.WebPort, path))
 	}
 	return map[string]any{
 		"enabled":      cfg.DAVEnabled,
-		"user":         cfg.DAVUser,
-		"password":     cfg.DAVPassword,
-		"password_set": cfg.DAVPassword != "",
+		"account":      ac.ID,
+		"path":         path,
+		"user":         ac.DAVUser,
+		"password":     ac.DAVPassword,
+		"password_set": ac.DAVPassword != "",
 		"port":         cfg.WebPort,
 		"urls":         urls,
-		"read_only":    cfg.ReadOnly,
-		"redirect":     cfg.DAVRedirectOn(),
+		"read_only":    ac.ReadOnly,
+		"redirect":     ac.DAVRedirectOn(),
 		"rclone": fmt.Sprintf(
 			"rclone mount :webdav: /mnt/cmccyun --webdav-url %s --webdav-vendor other --webdav-user %s --webdav-pass $(rclone obscure '%s')",
-			urls[0], cfg.DAVUser, cfg.DAVPassword),
+			urls[0], ac.DAVUser, ac.DAVPassword),
 	}
 }
 
 // SetDAV applies a patch from the console: enable/disable, rename, reset the
 // password, toggle redirect. Enabling without a password generates one.
-func (s *Service) SetDAV(patch map[string]any) (map[string]any, error) {
+func (s *Service) SetDAV(id string, patch map[string]any) (map[string]any, error) {
 	s.mu.Lock()
+	a, ac, err := s.acctLocked(id)
+	if err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
 	if v, ok := patch["enabled"].(bool); ok {
 		s.cfg.DAVEnabled = v
-		if v && s.cfg.DAVPassword == "" {
-			s.cfg.DAVPassword = newDAVPassword()
-			s.logger.Printf("WebDAV：已生成访问密码（在控制台「远程挂载 (WebDAV)」里复制）")
+		// 打开开关时，把所有还没设过密码的账号补一条（多账号下每台都有自己的凭据）。
+		if v {
+			for i := range s.cfg.Accounts {
+				o := &s.cfg.Accounts[i]
+				if o.DAVUser == "" {
+					o.DAVUser = config.DefaultDAVUser
+				}
+				if o.DAVPassword == "" && o.Authorization != "" {
+					o.DAVPassword = newDAVPassword()
+				}
+			}
+			if ac.DAVPassword != "" {
+				s.logger.Printf("WebDAV：已开启（账号 %s，用户 %s）", ac.DisplayName(), ac.DAVUser)
+			}
 		}
 	}
 	if v, ok := patch["user"].(string); ok {
@@ -270,30 +350,30 @@ func (s *Service) SetDAV(patch map[string]any) (map[string]any, error) {
 		if v == "" {
 			v = config.DefaultDAVUser
 		}
-		s.cfg.DAVUser = v
+		ac.DAVUser = v
 	}
 	if v, ok := patch["password"].(string); ok {
 		v = strings.TrimSpace(v)
 		if v == "" {
-			s.cfg.DAVPassword = newDAVPassword()
+			ac.DAVPassword = newDAVPassword()
 		} else {
 			if len(v) < 4 {
 				s.mu.Unlock()
 				return nil, fmt.Errorf("密码至少 4 位")
 			}
-			s.cfg.DAVPassword = v
+			ac.DAVPassword = v
 		}
 	}
 	if v, ok := patch["regenerate"].(bool); ok && v {
-		s.cfg.DAVPassword = newDAVPassword()
+		ac.DAVPassword = newDAVPassword()
 	}
 	if v, ok := patch["redirect"].(bool); ok {
 		vv := v
-		s.cfg.DAVRedirect = &vv
+		ac.DAVRedirect = &vv
 	}
 	// 只读是 FUSE 和 WebDAV 共用的开关，改了就重建 FS，让新连接立刻生效。
 	if _, ok := patch["read_only"].(bool); ok {
-		s.davFS = nil
+		a.davFS = nil
 	}
 	cfgPath := s.cfgPath
 	cfg := *s.cfg
@@ -302,13 +382,14 @@ func (s *Service) SetDAV(patch map[string]any) (map[string]any, error) {
 	if err := config.Save(cfgPath, &cfg); err != nil {
 		return nil, err
 	}
-	return s.DAVInfo(), nil
+	return s.DAVInfo(id), nil
 }
 
 // registerDAVRoutes wires the console API for this page.
 func (s *Service) registerDAVRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/dav/info", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]any{"ok": true, "dav": s.DAVInfo()})
+		id := r.URL.Query().Get("account")
+		writeJSON(w, map[string]any{"ok": true, "dav": s.DAVInfo(id)})
 	})
 
 	mux.HandleFunc("/api/dav/config", func(w http.ResponseWriter, r *http.Request) {
@@ -321,14 +402,18 @@ func (s *Service) registerDAVRoutes(mux *http.ServeMux) {
 			writeErr(w, "请求格式错误: "+err.Error())
 			return
 		}
-		info, err := s.SetDAV(patch)
+		id := r.URL.Query().Get("account")
+		if v, ok := patch["account"].(string); ok && v != "" {
+			id = v
+		}
+		info, err := s.SetDAV(id, patch)
 		if err != nil {
 			writeErr(w, err.Error())
 			return
 		}
 		// 开关状态变化后要让页面上的「已启用」徽标立刻对：配置已经在
 		// SetDAV 里写盘，这里只需要回最新的 info。
-		writeJSON(w, map[string]any{"ok": true, "dav": info, "config": s.MaskPtr()})
+		writeJSON(w, map[string]any{"ok": true, "dav": info, "config": s.MaskPtrFor(accID(r))})
 	})
 }
 

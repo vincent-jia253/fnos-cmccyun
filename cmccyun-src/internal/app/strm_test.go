@@ -1,6 +1,8 @@
 package app
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,8 +40,8 @@ func TestStrmTabInConsole(t *testing.T) {
 // 输出目录塞进挂载点＝把 .strm 写到云端去，必须拦下来。
 func TestStrmRejectsOutputInsideMount(t *testing.T) {
 	s, root := newMountSvc(t, filepath.Join("/tmp", "cmccyun-strmtest"))
-	s.cfg.MountPoint = filepath.Join(root, "mnt")
-	if err := osMkdirAll(s.cfg.MountPoint); err != nil {
+	acct0(s.cfg).MountPoint = filepath.Join(root, "mnt")
+	if err := osMkdirAll(acct0(s.cfg).MountPoint); err != nil {
 		t.Fatal(err)
 	}
 
@@ -52,7 +54,7 @@ func TestStrmRejectsOutputInsideMount(t *testing.T) {
 		return rec
 	}
 
-	rec := post(`{"pairs":[{"cloud":"/01影视","local":"` + s.cfg.MountPoint + `/movie"}]}`)
+	rec := post(`{"pairs":[{"cloud":"/01影视","local":"` + acct0(s.cfg).MountPoint + `/movie"}]}`)
 	if rec.Code == http.StatusOK || !strings.Contains(rec.Body.String(), "挂载点") {
 		t.Fatalf("输出目录在挂载点里应被拒绝，实际 %d：%s", rec.Code, rec.Body.String())
 	}
@@ -73,18 +75,19 @@ func TestStrmRejectsOutputInsideMount(t *testing.T) {
 		t.Error("url 模式应自动生成访问口令")
 	}
 	cfg := s.Config()
-	if len(cfg.StrmPairs) != 1 || cfg.StrmPairs[0].Local != out {
-		t.Fatalf("映射没存进配置：%+v", cfg.StrmPairs)
+	ac0 := acctView(cfg)
+	if len(ac0.StrmPairs) != 1 || ac0.StrmPairs[0].Local != out {
+		t.Fatalf("映射没存进配置：%+v", ac0.StrmPairs)
 	}
-	if cfg.StrmIntervalMin != 7 || cfg.StrmMode != "url" || !cfg.StrmEnabled {
-		t.Fatalf("其它字段没存对：%+v", cfg)
+	if ac0.StrmIntervalMin != 7 || ac0.StrmMode != "url" || !ac0.StrmEnabled {
+		t.Fatalf("其它字段没存对：%+v", ac0)
 	}
 	// 落盘的配置也要真的带上（重启后还在）
 	reloaded, err := loadCfg(s.cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(reloaded.StrmPairs) != 1 || reloaded.StrmPairs[0].Local != out {
+	if acr := acctView(*reloaded); len(acr.StrmPairs) != 1 || acr.StrmPairs[0].Local != out {
 		t.Error("配置没有写进磁盘")
 	}
 }
@@ -113,7 +116,7 @@ func TestStrmScanNeedsEnable(t *testing.T) {
 // 播放直链：口令不对 403；口令对但没 id 400。
 func TestStrmPlayGuards(t *testing.T) {
 	s, _ := newMountSvc(t, "")
-	s.cfg.StrmToken = "tk-abc"
+	acct0(s.cfg).StrmToken = "tk-abc"
 	h := s.Handler()
 
 	rec := httptest.NewRecorder()
@@ -129,7 +132,7 @@ func TestStrmPlayGuards(t *testing.T) {
 	}
 
 	// 没设口令时不拦（局域网自用场景），但缺 id 仍然是 400
-	s.cfg.StrmToken = ""
+	acct0(s.cfg).StrmToken = ""
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/strm/play", nil))
 	if rec.Code != http.StatusBadRequest {
@@ -158,12 +161,12 @@ func TestSplitExts(t *testing.T) {
 func TestStrmModeSelection(t *testing.T) {
 	s, _ := newMountSvc(t, "")
 	cfg := s.Config()
-	cfg.MountPoint = filepath.Join(t.TempDir(), "不存在的挂载点")
-	if got := strmMode(cfg); got != "url" {
+	acct0(&cfg).MountPoint = filepath.Join(t.TempDir(), "不存在的挂载点")
+	if got := strmMode(acctView(cfg)); got != "url" {
 		t.Errorf("没挂载时应退回 url，实际 %s", got)
 	}
-	cfg.StrmMode = "path"
-	if got := strmMode(cfg); got != "path" {
+	acct0(&cfg).StrmMode = "path"
+	if got := strmMode(acctView(cfg)); got != "path" {
 		t.Errorf("显式 path 应被尊重，实际 %s", got)
 	}
 }
@@ -189,5 +192,43 @@ func TestStrmMountPrefix(t *testing.T) {
 		if got := strmMountPrefix(c.mount, c.cloud); got != c.want {
 			t.Fatalf("strmMountPrefix(%q,%q)=%q，期望 %q", c.mount, c.cloud, got, c.want)
 		}
+	}
+}
+
+// v1.6 的 STRM 快照只按「云端目录|本地目录」命名，v1.7 起带账号 ID。
+// 升级时必须把老文件改名接上，否则第一次扫描会把没变的 .strm 全部重写，
+// 媒体库跟着整库重扫。
+func TestStrmStateMigrationFromLegacyName(t *testing.T) {
+	s, root := newMountSvc(t, "")
+	dir := filepath.Join(filepath.Dir(s.cfgPath), "strm-state")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pair := config.StrmPair{Cloud: "/01影视", Local: filepath.Join(root, "strm")}
+	sum := sha1.Sum([]byte(pair.Cloud + "|" + pair.Local))
+	legacy := filepath.Join(dir, hex.EncodeToString(sum[:6])+".json")
+	if err := os.WriteFile(legacy, []byte(`{"files":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s.migrateLegacyStrmState(config.DefaultAccountID, pair)
+	cur := s.strmStatePath(config.DefaultAccountID, pair)
+	if _, err := os.Stat(cur); err != nil {
+		t.Fatalf("老快照没有改名到 %s: %v", filepath.Base(cur), err)
+	}
+	if _, err := os.Stat(legacy); err == nil {
+		t.Error("老文件还在，会被当成两份状态")
+	}
+
+	// 非默认账号不许吃默认账号的老快照（那是另一台云盘的状态）
+	other := config.StrmPair{Cloud: "/02", Local: filepath.Join(root, "strm2")}
+	otherLegacy := filepath.Join(dir, hex.EncodeToString(func() []byte {
+		h := sha1.Sum([]byte(other.Cloud + "|" + other.Local))
+		return h[:6]
+	}())+".json")
+	_ = os.WriteFile(otherLegacy, []byte(`{"files":{}}`), 0o600)
+	s.migrateLegacyStrmState("acc-not-default", other)
+	if _, err := os.Stat(s.strmStatePath("acc-not-default", other)); err == nil {
+		t.Error("非默认账号把别人的老快照抢走了")
 	}
 }

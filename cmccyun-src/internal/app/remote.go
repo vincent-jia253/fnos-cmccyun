@@ -20,9 +20,18 @@ import (
 
 // apiClient 取一个客户端指针。锁只用来拿指针，网络请求一律在锁外做。
 func (s *Service) apiClient() (*api.Client, error) {
+	return s.apiClientOf("")
+}
+
+// apiClientOf 取指定账号的客户端（多账号下控制台按 ?account= 选）。
+func (s *Service) apiClientOf(id string) (*api.Client, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.clientLocked()
+	a, ac, err := s.acctLocked(id)
+	if err != nil {
+		return nil, err
+	}
+	return s.clientLocked(a, ac)
 }
 
 func writeOK(w http.ResponseWriter, kv map[string]any) {
@@ -35,7 +44,7 @@ func writeOK(w http.ResponseWriter, kv map[string]any) {
 
 // childID 在父目录里按名字找一个条目的 fileId（找不到返回空串）。
 func (s *Service) childID(ctx context.Context, parentID, name string) string {
-	files, err := s.remoteList(ctx, parentID)
+	files, err := s.remoteListOf("", ctx, parentID)
 	if err != nil {
 		return ""
 	}
@@ -68,7 +77,7 @@ func (s *Service) registerRemoteRoutes(mux *http.ServeMux) {
 		if body.Parent == "" {
 			body.Parent = api.RootID
 		}
-		c, err := s.apiClient()
+		c, err := s.apiClientOf(accID(r))
 		if err != nil {
 			writeErr(w, err.Error())
 			return
@@ -108,7 +117,7 @@ func (s *Service) registerRemoteRoutes(mux *http.ServeMux) {
 			writeErr(w, "缺少文件 ID 或新名字")
 			return
 		}
-		c, err := s.apiClient()
+		c, err := s.apiClientOf(accID(r))
 		if err != nil {
 			writeErr(w, err.Error())
 			return
@@ -140,7 +149,7 @@ func (s *Service) registerRemoteRoutes(mux *http.ServeMux) {
 			writeErr(w, "没有指定要删除的条目")
 			return
 		}
-		c, err := s.apiClient()
+		c, err := s.apiClientOf(accID(r))
 		if err != nil {
 			writeErr(w, err.Error())
 			return
@@ -166,7 +175,7 @@ func (s *Service) registerRemoteRoutes(mux *http.ServeMux) {
 			writeErr(w, "缺少文件 ID")
 			return
 		}
-		c, err := s.apiClient()
+		c, err := s.apiClientOf(accID(r))
 		if err != nil {
 			writeErr(w, err.Error())
 			return
@@ -218,7 +227,7 @@ func (s *Service) registerRemoteRoutes(mux *http.ServeMux) {
 			writeErr(w, "写入临时文件失败: "+err.Error())
 			return
 		}
-		c, err := s.apiClient()
+		c, err := s.apiClientOf(accID(r))
 		if err != nil {
 			writeErr(w, err.Error())
 			return

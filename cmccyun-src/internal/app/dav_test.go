@@ -20,7 +20,7 @@ func fakeAuth() string {
 func davSvc(t *testing.T) *Service {
 	t.Helper()
 	s, _ := newMountSvc(t, "")
-	s.cfg.Authorization = fakeAuth()
+	acct0(s.cfg).Authorization = fakeAuth()
 	return s
 }
 
@@ -103,7 +103,7 @@ func TestDAVEnableGeneratesPassword(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg2.DAVEnabled || cfg2.DAVPassword != resp.DAV.Password {
+	if !cfg2.DAVEnabled || acctView(*cfg2).DAVPassword != resp.DAV.Password {
 		t.Error("开关/密码没有写进配置文件，重启就丢了")
 	}
 
@@ -111,14 +111,14 @@ func TestDAVEnableGeneratesPassword(t *testing.T) {
 	pw := resp.DAV.Password
 	_ = davPost(t, s, "/api/dav/config", `{"enabled":false}`)
 	_ = davPost(t, s, "/api/dav/config", `{"enabled":true}`)
-	if got := s.Config().DAVPassword; got != pw {
+	if got := acctView(s.Config()).DAVPassword; got != pw {
 		t.Errorf("重新打开开关不该换密码：原 %q 现 %q", pw, got)
 	}
 
 	// 显式重置才换。
-	before := s.Config().DAVPassword
+	before := acctView(s.Config()).DAVPassword
 	_ = davPost(t, s, "/api/dav/config", `{"regenerate":true}`)
-	after := s.Config().DAVPassword
+	after := acctView(s.Config()).DAVPassword
 	if after == before || len(after) != 16 {
 		t.Errorf("regenerate 应换一个新的 16 位密码，原 %q 现 %q", before, after)
 	}
@@ -163,8 +163,8 @@ func TestDAVAuthGate(t *testing.T) {
 func TestDAVReadOnlyBlocksWrites(t *testing.T) {
 	s := davSvc(t)
 	_ = davPost(t, s, "/api/dav/config", `{"enabled":true,"password":"test-pass-123"}`)
-	s.cfg.ReadOnly = true
-	s.davFS = nil
+	acct0(s.cfg).ReadOnly = true
+	davReset(s)
 
 	for _, m := range []string{"PUT", "DELETE", "MKCOL", "MOVE", "COPY"} {
 		req := httptest.NewRequest(m, "/dav/01影视/x.mkv", strings.NewReader("x"))

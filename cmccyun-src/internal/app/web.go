@@ -17,10 +17,28 @@ import (
 	"github.com/vincent-jia253/fnos-cmccyun/internal/api"
 )
 
+// accID 从请求里取账号 ID（?account=xxx；空表示默认账号）。
+// 多账号下所有接口都用它选目标，单账号时永远是空串——行为与以前完全一致。
+func accID(r *http.Request) string {
+	return strings.TrimSpace(r.URL.Query().Get("account"))
+}
+
 // remoteList lists a directory on the cloud drive (used by the console picker).
 func (s *Service) remoteList(ctx context.Context, dirID string) ([]api.File, error) {
+	return s.remoteListOf("", ctx, dirID)
+}
+
+// remoteListOf 列指定账号的云盘目录。
+func (s *Service) remoteListOf(id string, ctx context.Context, dirID string) ([]api.File, error) {
 	s.mu.Lock()
-	c, err := s.clientLocked()
+	a, ac, aerr := s.acctLocked(id)
+	var c *api.Client
+	var err error
+	if aerr == nil {
+		c, err = s.clientLocked(a, ac)
+	} else {
+		err = aerr
+	}
 	s.mu.Unlock()
 	if err != nil {
 		return nil, err
@@ -61,17 +79,17 @@ func (s *Service) Handler() http.Handler {
 	})
 
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
-		st := s.Status()
 		writeJSON(w, map[string]any{
-			"status": st,
-			"config": s.MaskPtr(),
-			"pid":    os.Getpid(),
+			"status":   s.StatusOf(accID(r)),
+			"accounts": s.AccountsView(),
+			"config":   s.MaskPtrFor(accID(r)),
+			"pid":      os.Getpid(),
 		})
 	})
 
 	mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			writeJSON(w, map[string]any{"config": s.MaskPtr()})
+			writeJSON(w, map[string]any{"config": s.MaskPtrFor(accID(r))})
 			return
 		}
 		var patch map[string]any
@@ -79,11 +97,11 @@ func (s *Service) Handler() http.Handler {
 			writeErr(w, "请求格式错误: "+err.Error())
 			return
 		}
-		if err := s.Update(patch); err != nil {
+		if err := s.UpdateOf(accID(r), patch); err != nil {
 			writeErr(w, err.Error())
 			return
 		}
-		writeJSON(w, map[string]any{"ok": true, "config": s.MaskPtr()})
+		writeJSON(w, map[string]any{"ok": true, "config": s.MaskPtrFor(accID(r))})
 	})
 
 	// /api/auth/refresh renews the pasted ticket on demand. The ticket is good
@@ -92,11 +110,12 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/api/auth/refresh", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 		defer cancel()
-		if err := s.refreshAuth(ctx, true); err != nil {
+		aid := accID(r)
+		if err := s.refreshAuth(ctx, aid, true); err != nil {
 			writeErr(w, err.Error())
 			return
 		}
-		st := s.Status().Auth
+		st := s.StatusOf(aid).Auth
 		msg := "令牌已刷新"
 		if st.ExpiresDays > 0 {
 			msg = fmt.Sprintf("令牌已刷新，剩余 %.1f 天", st.ExpiresDays)
@@ -113,7 +132,7 @@ func (s *Service) Handler() http.Handler {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 		defer cancel()
-		id, png, ttl, err := s.StartQrLogin(ctx)
+		id, png, ttl, err := s.StartQrLogin(ctx, accID(r))
 		if err != nil {
 			writeErr(w, err.Error())
 			return
@@ -142,19 +161,19 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/api/test", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
-		files, err := s.remoteList(ctx, api.RootID)
+		files, err := s.remoteListOf(accID(r), ctx, api.RootID)
 		if err != nil {
 			writeErr(w, err.Error())
 			return
 		}
-		writeJSON(w, map[string]any{"ok": true, "account": s.Status().Account, "entries": len(files)})
+		writeJSON(w, map[string]any{"ok": true, "account": s.StatusOf(accID(r)).Account, "entries": len(files)})
 	})
 
 	mux.HandleFunc("/api/remote/list", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 		defer cancel()
 		dir := r.URL.Query().Get("dir")
-		files, err := s.remoteList(ctx, dir)
+		files, err := s.remoteListOf(accID(r), ctx, dir)
 		if err != nil {
 			writeErr(w, err.Error())
 			return
@@ -175,7 +194,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/api/mount", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 		defer cancel()
-		if err := s.Mount(ctx); err != nil {
+		if err := s.MountOf(ctx, accID(r)); err != nil {
 			writeErr(w, err.Error())
 			return
 		}
@@ -183,7 +202,7 @@ func (s *Service) Handler() http.Handler {
 	})
 
 	mux.HandleFunc("/api/unmount", func(w http.ResponseWriter, r *http.Request) {
-		if err := s.Unmount(); err != nil {
+		if err := s.UnmountOf(accID(r)); err != nil {
 			writeErr(w, err.Error())
 			return
 		}
@@ -193,7 +212,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/api/remount", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 		defer cancel()
-		if err := s.Remount(ctx); err != nil {
+		if err := s.RemountOf(ctx, accID(r)); err != nil {
 			writeErr(w, err.Error())
 			return
 		}
@@ -219,7 +238,12 @@ func (s *Service) Handler() http.Handler {
 			Vol   string `json:"-"`
 		}
 		var links []link
-		curMp := s.Config().MountPoint
+		cfgNow := s.Config()
+		curAcc, _ := cfgNow.AccountByID(accID(r))
+		curMp := ""
+		if curAcc != nil {
+			curMp = curAcc.MountPoint
+		}
 		curVol := volumeOf(curMp)
 		for _, root := range VolumeRoots() {
 			ents, err := os.ReadDir(root)
@@ -272,7 +296,7 @@ func (s *Service) Handler() http.Handler {
 			}
 		}
 		// Any existing mount point from config is always offered.
-		if mp := s.Config().MountPoint; mp != "" {
+		if mp := curMp; mp != "" {
 			out = append(out, mp)
 			links = append(links, link{Label: "当前挂载点", Path: mp, Hint: "正在使用的位置"})
 		}
@@ -303,7 +327,7 @@ func (s *Service) Handler() http.Handler {
 			writeErr(w, "请求格式错误: "+err.Error())
 			return
 		}
-		p, err := s.CreateMountDir(body.Parent, body.Name)
+		p, err := s.CreateMountDirOf(accID(r), body.Parent, body.Name)
 		if err != nil {
 			writeErr(w, err.Error())
 			return
@@ -318,7 +342,7 @@ func (s *Service) Handler() http.Handler {
 			AllowNonEmpty bool   `json:"allow_nonempty"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		info, err := s.CheckMountPath(body.Path, body.AllowNonEmpty)
+		info, err := s.CheckMountPathOf(accID(r), body.Path, body.AllowNonEmpty)
 		if err != nil {
 			writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
 			return
@@ -340,7 +364,7 @@ func (s *Service) Handler() http.Handler {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
 		defer cancel()
-		if err := s.SetMountPoint(ctx, body.Path, SetMountPointOptions{
+		if err := s.SetMountPointOf(accID(r), ctx, body.Path, SetMountPointOptions{
 			Create:        body.Create,
 			AllowNonEmpty: body.AllowNonEmpty,
 			FollowOwner:   body.FollowOwner,
@@ -348,7 +372,8 @@ func (s *Service) Handler() http.Handler {
 			writeErr(w, err.Error())
 			return
 		}
-		writeJSON(w, map[string]any{"ok": true, "config": s.MaskPtr(), "status": s.Status()})
+		writeJSON(w, map[string]any{"ok": true, "config": s.MaskPtrFor(accID(r)),
+			"status": s.StatusOf(accID(r)), "accounts": s.AccountsView()})
 	})
 
 	// 「云盘浏览」里的写操作（新建文件夹 / 重命名 / 回收站 / 下载 / 上传）
@@ -357,10 +382,15 @@ func (s *Service) Handler() http.Handler {
 	// 影视 STRM：控制台接口 + 播放直链。
 	s.registerStrmRoutes(mux)
 
-	// 远程挂载（WebDAV）：控制台接口 + /dav/ 本体。
+	// 多账号管理：列表 / 新增 / 改名 / 删除 / 设默认。
+	s.registerAccountRoutes(mux)
+
+	// 远程挂载（WebDAV）：控制台接口 + /dav/ 本体（多账号时还有 /dav/<id>/）。
 	s.registerDAVRoutes(mux)
-	mux.Handle("/dav", s.davHandler())
-	mux.Handle("/dav/", s.davHandler())
+	// /dav/<id>/ 靠分派器认账号，不再按账号注册路由：账号能在运行时新增，
+	// 路由钉死了新账号就 404（要么就得重启才生效）。
+	mux.Handle("/dav", s.davDispatch())
+	mux.Handle("/dav/", s.davDispatch())
 
 	return mux
 }

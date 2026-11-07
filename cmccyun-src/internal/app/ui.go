@@ -77,6 +77,12 @@ const indexHTML = `<!DOCTYPE html>
     white-space:nowrap;
   }
   .chip b{color:var(--fg); font-weight:560;}
+  /* 顶栏的账号切换器：形状跟 chip 一致，宽度跟着内容走 */
+  .acctsel{
+    width:auto; min-width:132px; max-width:220px;
+    font-size:12.5px; padding:6px 10px; border-radius:999px;
+    background:var(--card2); color:var(--fg);
+  }
   /* 带悬停说明的元素：给个「可以问」的指针提示 */
   .chip[title]{cursor:help;}
   .hint[title]{cursor:help;}
@@ -346,6 +352,7 @@ const indexHTML = `<!DOCTYPE html>
   </div>
   <div class="grow"></div>
   <div class="chips">
+    <select id="acctSel" class="acctsel" style="display:none" title="切换账号：下面每个页签都只作用在当前账号上"></select>
     <span id="badgeMount" class="chip"><i class="dot"></i><b>状态读取中…</b></span>
     <span id="badgeAcct" class="chip">未授权</span>
     <span id="badgeAuth" class="chip">-</span>
@@ -388,6 +395,7 @@ const indexHTML = `<!DOCTYPE html>
 
     <nav class="tabs" id="tabs">
       <button class="tab act" data-tab="mount">挂载设置</button>
+      <button class="tab" data-tab="accounts">账号</button>
       <button class="tab" data-tab="auth">授权</button>
       <button class="tab" data-tab="browse">云盘浏览</button>
       <button class="tab" data-tab="dav">远程挂载</button>
@@ -706,6 +714,39 @@ const indexHTML = `<!DOCTYPE html>
       </div>
     </section>
 
+    <!-- ===== 账号（多账号管理） ===== -->
+    <section class="panel" id="tab-accounts">
+      <div class="card">
+        <div class="hd">
+          <h2>账号</h2><span class="tag" id="acctCount">—</span>
+          <span class="sub">一个控制台管多台 139 云盘：各自授权、各自挂载点、各自 WebDAV 与 STRM</span>
+        </div>
+        <div class="bd">
+          <div class="scroll" style="max-height:none">
+            <table>
+              <thead><tr><th>账号</th><th>挂载位置</th><th>WebDAV 路径</th><th>挂载状态</th><th style="text-align:right">操作</th></tr></thead>
+              <tbody id="acctBody"><tr><td colspan="5" class="empty">尚未加载</td></tr></tbody>
+            </table>
+          </div>
+          <div class="grid" style="margin-top:14px">
+            <div><label>备注名（可空，留空就显示账号尾号）</label><input id="newAcctName" spellcheck="false" placeholder="例如 家庭号" /></div>
+            <div><label>挂载位置（绝对路径，必须与其它账号互不包含）</label><input id="newAcctMount" spellcheck="false" placeholder="/vol4/1000/移动云盘-2" /></div>
+          </div>
+          <div class="actions">
+            <button id="btnAcctAdd" class="primary">新增账号</button>
+            <button id="btnAcctRefresh" class="ghost">刷新列表</button>
+          </div>
+          <div class="msg" id="acctMsg"></div>
+          <div class="hint" style="margin-top:10px">
+            新账号加完要单独授权：切到该账号 → 在「授权」页扫码或粘贴一条它自己的 Authorization → 回「挂载设置」点挂载。<br>
+            挂载点之间不能互相包含（<code class="k">/vol4/1000/移动云盘</code> 和 <code class="k">/vol4/1000/移动云盘/电影</code> 只能留一个），
+            否则同一棵目录树会被两个账号同时接管。<br>
+            WebDAV 路径：默认账号沿用老地址 <code class="k">/dav/</code>，其余账号是 <code class="k">/dav/&lt;账号 ID&gt;/</code>，凭据各自独立。
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- ===== 日志 ===== -->
     <section class="panel" id="tab-logs">
       <div class="card">
@@ -783,6 +824,9 @@ var dirStack = [];
 var mounted = false;
 var lastSt = null;      // 最近一次成功读取的状态
 var browseLoaded = false;
+var curAccount = "";    // 当前操作的账号 ID；"" 表示默认账号
+var accounts = [];      // /api/status 里的 accounts（不含密文）
+var curTab = "mount";
 
 /* ---------------- 消息：toast + 行内 ---------------- */
 function toast(text, kind) {
@@ -806,6 +850,15 @@ function say(el, text, ok) {
   n.className = "msg " + (ok === undefined ? "" : (ok ? "ok" : "err"));
 }
 
+/* 所有 /api 请求都带上当前账号：不带参数时后端按默认账号处理，
+   所以单账号用户看到的行为和以前一模一样。 */
+function withAcct(path) {
+  if (path.indexOf("/api/") !== 0) return path;
+  if (path.indexOf("account=") >= 0) return path;
+  if (!curAccount) return path;
+  return path + (path.indexOf("?") >= 0 ? "&" : "?") + "account=" + encodeURIComponent(curAccount);
+}
+
 /* ---------------- 请求（带超时，绝不无限转圈） ---------------- */
 async function api(path, opts) {
   opts = opts || {};
@@ -814,7 +867,7 @@ async function api(path, opts) {
   var timer = setTimeout(function () { ac.abort(); }, ms);
   try {
     var req = Object.assign({ headers: { "Content-Type": "application/json" }, signal: ac.signal }, opts);
-    var res = await fetch(path, req);
+    var res = await fetch(withAcct(path), req);
     var data = await res.json().catch(function () { return { ok: false, error: "响应解析失败（HTTP " + res.status + "）" }; });
     if (!res.ok || data.ok === false) throw new Error(data.error || ("HTTP " + res.status));
     return data;
@@ -868,6 +921,7 @@ var AUTH_TIP = [
 
 /* ---------------- 标签页 ---------------- */
 function showTab(name) {
+  curTab = name;
   var tabs = document.querySelectorAll(".tab");
   for (var i = 0; i < tabs.length; i++) {
     tabs[i].classList.toggle("act", tabs[i].dataset.tab === name);
@@ -876,6 +930,7 @@ function showTab(name) {
   for (var j = 0; j < panels.length; j++) {
     panels[j].classList.toggle("act", panels[j].id === "tab-" + name);
   }
+  if (name === "accounts") renderAcctTable();
   if (name === "logs") loadLogs();
   if (name === "dav") loadDav();
   if (name === "strm") loadStrm();
@@ -886,6 +941,186 @@ function showTab(name) {
 document.querySelectorAll(".tab").forEach(function (b) {
   b.onclick = function () { showTab(b.dataset.tab); };
 });
+
+/* ---------------- 账号（多账号切换 / 管理） ---------------- */
+function acctExists(id) {
+  for (var i = 0; i < accounts.length; i++) if (accounts[i].id === id) return true;
+  return false;
+}
+
+function curAcctObj() {
+  for (var i = 0; i < accounts.length; i++) if (accounts[i].id === curAccount) return accounts[i];
+  for (var j = 0; j < accounts.length; j++) if (accounts[j].default) return accounts[j];
+  return null;
+}
+
+/* 顶栏切换器：账号只有一个时不显示，保持单账号界面干净 */
+function renderAcctSel() {
+  var sel = $("acctSel");
+  if (!sel) return;
+  var sig = "";
+  for (var i = 0; i < accounts.length; i++) sig += accounts[i].id + "|" + (accounts[i].name || "") + ";";
+  if (sel.dataset.sig !== sig) {
+    sel.dataset.sig = sig;
+    var html = "";
+    for (var j = 0; j < accounts.length; j++) {
+      var a = accounts[j];
+      var lab = a.name || a.id;
+      if (a.default) lab += "（默认）";
+      if (!a.authorization_set) lab += " · 未授权";
+      html += '<option value="' + esc(a.id) + '">' + esc(lab) + "</option>";
+    }
+    sel.innerHTML = html;
+  }
+  if (curAccount) sel.value = curAccount;
+  sel.style.display = accounts.length > 1 ? "" : "none";
+  sel.title = "切换账号：下面每个页签都只作用在当前账号上（共 " + accounts.length + " 个）";
+}
+
+function acctBtns(a, isCur) {
+  var b = [];
+  if (!isCur) b.push('<button class="sm" data-act="switch" data-id="' + esc(a.id) + '">切换</button>');
+  if (!a.default) b.push('<button class="sm ghost" data-act="default" data-id="' + esc(a.id) + '">设为默认</button>');
+  b.push('<button class="sm ghost" data-act="rename" data-id="' + esc(a.id) + '">改名</button>');
+  if (accounts.length > 1) b.push('<button class="sm danger" data-act="delete" data-id="' + esc(a.id) + '">删除</button>');
+  return b.join(" ");
+}
+
+function renderAcctTable() {
+  var body = $("acctBody");
+  if (!body) return;
+  var cnt = $("acctCount");
+  if (!accounts.length) {
+    body.innerHTML = '<tr><td colspan="5" class="empty">还没有账号</td></tr>';
+    if (cnt) cnt.textContent = "0 个";
+    return;
+  }
+  if (cnt) cnt.textContent = accounts.length + " 个";
+  var html = "";
+  for (var i = 0; i < accounts.length; i++) {
+    var a = accounts[i];
+    var isCur = (a.id === curAccount) || (!curAccount && a.default);
+    var tags = [];
+    if (a.default) tags.push('<span class="tag">默认</span>');
+    if (isCur) tags.push('<span class="tag">当前</span>');
+    if (a.mounted) tags.push('<span class="chip ok" style="padding:2px 8px">已挂载</span>');
+    if (!a.authorization_set) tags.push('<span class="chip warn" style="padding:2px 8px">未授权</span>');
+    if (a.strm_enabled) tags.push('<span class="chip" style="padding:2px 8px">STRM</span>');
+    var mp = a.mount_point
+      ? '<code class="k">' + esc(a.mount_point) + "</code>"
+      : '<span class="hint">未设置</span>';
+    if (a.read_only) mp += ' <span class="hint">只读</span>';
+    var st = a.mounted ? "已挂载" : "未挂载";
+    if (a.dead_mount) st = "残留挂载（失联）";
+    if (a.last_error) st += '<div class="hint" style="color:var(--err)">' + esc(a.last_error) + "</div>";
+    html += "<tr>" +
+      '<td><div class="fname"><span><b>' + esc(a.name || a.id) + "</b>" +
+        (a.account ? ' <span class="hint">' + esc(a.account) + "</span>" : "") +
+      '</span></div><div class="hint" style="margin-top:3px">' + tags.join(" ") + "</div></td>" +
+      "<td>" + mp + "</td>" +
+      '<td><code class="k">' + esc(a.dav_path || "") + "</code>" +
+        (a.dav_password_set ? "" : ' <span class="hint">未设密码</span>') + "</td>" +
+      "<td>" + st + "</td>" +
+      '<td style="text-align:right;white-space:nowrap">' + acctBtns(a, isCur) + "</td></tr>";
+  }
+  body.innerHTML = html;
+}
+
+/* 切换账号后，当前页签的内容必须跟着换（否则会看着旧账号的数据发呆） */
+function reloadTabForAccount() {
+  browseLoaded = false;
+  curDir = "/";
+  dirStack = [];
+  if (curTab === "dav") loadDav();
+  if (curTab === "strm") loadStrm();
+  if (curTab === "accounts") renderAcctTable();
+  if (curTab === "browse" && lastSt && lastSt.has_token) { browseLoaded = true; browse("/"); }
+  loadShares();
+}
+
+async function selectAccount(id) {
+  if (!id || id === curAccount) return;
+  curAccount = id;
+  renderAcctSel();
+  renderAcctTable();
+  try { await refresh(); } catch (e) { /* refresh 自己会报错 */ }
+  reloadTabForAccount();
+  var a = curAcctObj();
+  toast("已切换到「" + ((a && a.name) || id) + "」", "ok");
+}
+
+async function acctPost(body, btn, msg, okText) {
+  if (msg) say("acctMsg", "", true);
+  busy(btn, true, "处理中…");
+  try {
+    var d = await api("/api/accounts", { method: "POST", body: JSON.stringify(body), timeout: 60000 });
+    if (body.action === "add" && d.id) {
+      curAccount = d.id;
+      accounts = d.accounts || accounts;
+      toast(okText || "账号已新增：去「授权」页给它授权", "ok");
+      await refresh();
+      showTab("auth");
+    } else {
+      accounts = d.accounts || accounts;
+      if (body.action === "delete" && !acctExists(curAccount)) {
+        curAccount = d.default || (accounts[0] && accounts[0].id) || "";
+      }
+      toast(okText || "已保存", "ok");
+      await refresh();
+      reloadTabForAccount();
+    }
+    return d;
+  } catch (e) {
+    if (msg) say("acctMsg", e.message, false);
+    toast(e.message, "err");
+    return null;
+  } finally {
+    busy(btn, false);
+  }
+}
+
+(function bindAccounts() {
+  var sel = $("acctSel");
+  if (sel) sel.onchange = function () { selectAccount(this.value); };
+  var add = $("btnAcctAdd");
+  if (add) add.onclick = async function () {
+    var name = $("newAcctName").value.trim();
+    var mp = $("newAcctMount").value.trim();
+    if (!mp) { say("acctMsg", "先填挂载位置（绝对路径，例如 /vol4/1000/移动云盘-2）", false); $("newAcctMount").focus(); return; }
+    if (mp.charAt(0) !== "/") { say("acctMsg", "挂载位置要写绝对路径，以 / 开头", false); return; }
+    var d = await acctPost({ action: "add", name: name, mount_point: mp }, this, "acctMsg");
+    if (d) { $("newAcctName").value = ""; $("newAcctMount").value = ""; }
+  };
+  var rf = $("btnAcctRefresh");
+  if (rf) rf.onclick = async function () { await refresh(); renderAcctTable(); toast("账号列表已刷新", "ok"); };
+  var body = $("acctBody");
+  if (body) body.onclick = async function (ev) {
+    var t = ev.target;
+    while (t && t !== body && !(t.tagName === "BUTTON" && t.dataset && t.dataset.act)) t = t.parentNode;
+    if (!t || t === body) return;
+    var act = t.dataset.act, id = t.dataset.id;
+    if (act === "switch") { await selectAccount(id); return; }
+    if (act === "default") { await acctPost({ action: "default", id: id }, t, "acctMsg", "已设为默认账号（老地址 /dav/ 也跟着变）"); return; }
+    if (act === "rename") {
+      var a = null;
+      for (var i = 0; i < accounts.length; i++) if (accounts[i].id === id) a = accounts[i];
+      var n = prompt("新的备注名（留空则显示账号尾号）", (a && a.custom_name) || "");
+      if (n === null) return;
+      await acctPost({ action: "update", id: id, name: n }, t, "acctMsg", "备注名已改");
+      return;
+    }
+    if (act === "delete") {
+      var who = id, isDef = false;
+      for (var j = 0; j < accounts.length; j++) {
+        if (accounts[j].id === id) { who = accounts[j].name || id; isDef = !!accounts[j].default; }
+      }
+      var warn = isDef ? "\n\n这是默认账号：删掉之后 /dav/ 会交给剩下的那台，控制台默认打开的也是它。" : "";
+      if (!confirm("删除账号「" + who + "」？" + warn + "\n\n会先卸载它的挂载点，再删掉本地配置（云端文件和已生成的 .strm 不受影响）。")) return;
+      await acctPost({ action: "delete", id: id }, t, "acctMsg", "账号已删除");
+      return;
+    }
+  };
+})();
 
 /* ---------------- 影视 STRM ---------------- */
 var strmData = null;
@@ -1098,13 +1333,24 @@ async function refresh() {
   cfg = d.config || {};
   mounted = !!st.mounted;
   lastSt = st;
+  accounts = d.accounts || [];
+  if (!curAccount) curAccount = cfg.default_account || (accounts[0] && accounts[0].id) || "";
+  if (curAccount && !acctExists(curAccount)) {
+    curAccount = cfg.default_account || (accounts[0] && accounts[0].id) || "";
+  }
+  renderAcctSel();
+  renderAcctTable();
 
   // 顶栏
   $("badgeMount").className = "chip " + (mounted ? "ok live" : "");
   $("badgeMount").innerHTML = '<i class="dot"></i><b>' + (mounted ? "已挂载" : "未挂载") + "</b>";
-  var acct = st.has_token ? ("账号 " + (st.account || "已授权")) : "未授权";
+  var a0 = curAcctObj();
+  var who = st.account || "已授权";
+  if (a0 && a0.custom_name && accounts.length > 1) who = a0.custom_name + " · " + who;
+  var acct = st.has_token ? ("账号 " + who) : "未授权";
   $("badgeAcct").className = "chip " + (st.has_token ? "" : "warn");
   $("badgeAcct").textContent = acct;
+  $("badgeAcct").title = accounts.length > 1 ? "当前操作的是这台云盘；用左边的下拉切换账号" : "";
   $("badgeVer").textContent = "v" + (st.version || "-");
 
   var au = st.auth || {};
@@ -1541,7 +1787,7 @@ $("f_upload").onchange = async function () {
     fd.append("file", files[i]);
     try {
       // 上传不设超时：大文件要走分片，几十 GB 都可能
-      var res = await fetch("/api/remote/upload?parent=" + encodeURIComponent(remoteDir), { method: "POST", body: fd });
+      var res = await fetch(withAcct("/api/remote/upload?parent=" + encodeURIComponent(remoteDir)), { method: "POST", body: fd });
       var d = await res.json().catch(function () { return {}; });
       if (!res.ok || d.ok === false) throw new Error(d.error || ("HTTP " + res.status));
       ok++;

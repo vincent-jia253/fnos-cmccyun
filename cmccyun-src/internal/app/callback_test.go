@@ -41,8 +41,8 @@ func TestRefreshCallbackDoesNotDeadlockUnderServiceLock(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
 	cfg := config.Default()
-	cfg.Authorization = ticket("OLDTOK")
-	cfg.MountPoint = filepath.Join(dir, "mnt")
+	acct0(cfg).Authorization = ticket("OLDTOK")
+	acct0(cfg).MountPoint = filepath.Join(dir, "mnt")
 	cfg.StageDir = filepath.Join(dir, "staging")
 	cfg.LogFile = filepath.Join(dir, "cmccyun.log")
 	if err := config.Save(cfgPath, cfg); err != nil {
@@ -52,7 +52,7 @@ func TestRefreshCallbackDoesNotDeadlockUnderServiceLock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := s.newClient(cfg.Authorization)
+	c, err := s.newClient(config.DefaultAccountID, acct0(cfg).Authorization)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestRefreshCallbackDoesNotDeadlockUnderServiceLock(t *testing.T) {
 	for {
 		got, err := config.Load(cfgPath)
 		if err == nil {
-			if got.Authorization == wantAuth {
+			if acctView(*got).Authorization == wantAuth {
 				return
 			}
 		}
@@ -109,8 +109,8 @@ func TestConnectDoesNotHoldServiceLock(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
 	cfg := config.Default()
-	cfg.Authorization = ticket("TOK")
-	cfg.MountPoint = filepath.Join(dir, "mnt")
+	acct0(cfg).Authorization = ticket("TOK")
+	acct0(cfg).MountPoint = filepath.Join(dir, "mnt")
 	cfg.StageDir = filepath.Join(dir, "staging")
 	cfg.LogFile = filepath.Join(dir, "cmccyun.log")
 	if err := config.Save(cfgPath, cfg); err != nil {
@@ -123,7 +123,7 @@ func TestConnectDoesNotHoldServiceLock(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, cerr := s.connect(context.Background())
+		_, cerr := s.connect(context.Background(), "")
 		done <- cerr
 	}()
 

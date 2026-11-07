@@ -23,10 +23,17 @@ import (
 type qrSession struct {
 	handle  string
 	expires time.Time
+	// acct 是这次扫码要写到哪个账号上（多账号下每台云盘各自扫一次）。
+	acct string
 }
 
 // StartQrLogin 生成一次扫码会话，返回 id、二维码 PNG 和有效期（秒）。
-func (s *Service) StartQrLogin(ctx context.Context) (string, []byte, int, error) {
+func (s *Service) StartQrLogin(ctx context.Context, id string) (string, []byte, int, error) {
+	cfg := s.Config()
+	ac, ok := cfg.AccountByID(id)
+	if !ok {
+		return "", nil, 0, fmt.Errorf("账号不存在：%s", id)
+	}
 	start, err := api.StartQrLogin(ctx)
 	if err != nil {
 		s.logf("扫码登录：获取二维码失败：%v", err)
@@ -37,14 +44,14 @@ func (s *Service) StartQrLogin(ctx context.Context) (string, []byte, int, error)
 	if err != nil {
 		return "", nil, 0, fmt.Errorf("生成二维码图片失败: %w", err)
 	}
-	id := s.newQrID()
+	sid := s.newQrID()
 	s.qrMu.Lock()
 	s.qrCleanLocked()
-	s.qr[id] = &qrSession{handle: start.Handle, expires: time.Now().Add(start.ExpiresIn)}
+	s.qr[sid] = &qrSession{handle: start.Handle, expires: time.Now().Add(start.ExpiresIn), acct: ac.ID}
 	s.qrMu.Unlock()
 	secs := int(start.ExpiresIn.Seconds())
-	s.logf("扫码登录：已生成二维码，%d 秒内有效", secs)
-	return id, png, secs, nil
+	s.logf("扫码登录：已生成二维码（账号 %s），%d 秒内有效", ac.DisplayName(), secs)
+	return sid, png, secs, nil
 }
 
 // PollQrLogin 问一次状态，返回值直接给前端渲染。
@@ -83,13 +90,13 @@ func (s *Service) PollQrLogin(ctx context.Context, id string) (map[string]any, e
 	switch res.Status {
 	case api.QrConfirmed:
 		s.dropQr(id)
-		if err := s.applyQrAuth(res.Authorization); err != nil {
+		if err := s.applyQrAuth(sess.acct, res.Authorization); err != nil {
 			return nil, err
 		}
 		out["authorized"] = true
 		s.logf("扫码登录成功：账号 %s，授权已保存", res.Account)
 		// 挂载要几秒到几十秒，别把前端轮询卡住
-		go s.mountAfterLogin()
+		go s.mountAfterLogin(sess.acct)
 	case api.QrExpired, api.QrCancelled:
 		s.dropQr(id)
 	}
@@ -98,20 +105,20 @@ func (s *Service) PollQrLogin(ctx context.Context, id string) (map[string]any, e
 
 // applyQrAuth 把扫码拿到的 base64("pc:账号:令牌") 落到配置里。走的和手工粘贴
 // 完全同一个入口，所以续期、状态卡、挂载逻辑都不用改。
-func (s *Service) applyQrAuth(authorization string) error {
+func (s *Service) applyQrAuth(id, authorization string) error {
 	authorization = strings.TrimSpace(authorization)
 	if authorization == "" {
 		return fmt.Errorf("扫码结果里没有授权信息")
 	}
-	if err := s.Update(map[string]any{"authorization": authorization}); err != nil {
+	if err := s.UpdateOf(id, map[string]any{"authorization": authorization}); err != nil {
 		return fmt.Errorf("保存授权失败: %w", err)
 	}
 	return nil
 }
 
 // mountAfterLogin 在扫码成功后自动挂一次，省掉「还得手动点挂载」。
-func (s *Service) mountAfterLogin() {
-	st := s.Status()
+func (s *Service) mountAfterLogin(id string) {
+	st := s.StatusOf(id)
 	if st.Mounted {
 		return
 	}
@@ -121,11 +128,11 @@ func (s *Service) mountAfterLogin() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
-	if err := s.Mount(ctx); err != nil {
+	if err := s.MountOf(ctx, id); err != nil {
 		s.logf("扫码登录后自动挂载失败：%v（可在控制台点「挂载」重试）", err)
 		return
 	}
-	s.logf("扫码登录后已自动挂载到 %s", s.Status().MountPoint)
+	s.logf("扫码登录后已自动挂载到 %s", s.StatusOf(id).MountPoint)
 }
 
 func (s *Service) newQrID() string {
