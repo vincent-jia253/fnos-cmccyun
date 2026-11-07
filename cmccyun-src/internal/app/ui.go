@@ -673,7 +673,8 @@ const indexHTML = `<!DOCTYPE html>
       <div class="card">
         <div class="hd">
           <h2>影视 STRM</h2><span class="tag" id="strmState">未启用</span>
-          <span class="sub">把云盘里的影视文件生成 .strm，给飞牛影视 / Emby 当索引用</span>
+          <span class="tag" id="strmWho">—</span>
+          <span class="sub">把云盘里的影视文件生成 .strm，给飞牛影视 / Emby 当索引用；开关与映射<b>只作用于这个账号</b></span>
         </div>
         <div class="bd">
           <div class="checkline" style="height:34px">
@@ -709,6 +710,20 @@ const indexHTML = `<!DOCTYPE html>
             <button id="btnStrmScan">立即扫描</button>
           </div>
           <div id="msgStrm" class="msg"></div>
+
+          <!-- 多账号：每台账号的 STRM 分开管理，这里给一张总览（单账号时自动隐藏） -->
+          <div id="strmAllWrap" style="display:none;margin-top:20px;padding-top:14px;border-top:1px solid rgba(127,127,127,.18)">
+            <div class="hd" style="margin-bottom:8px">
+              <h2 style="font-size:15px">全部账号的 STRM</h2>
+              <span class="sub">每台账号各有自己的开关、映射与定时；这里只做总览与快捷操作</span>
+            </div>
+            <div class="scroll" style="max-height:none">
+              <table>
+                <thead><tr><th>账号</th><th>开关</th><th>模式</th><th>映射</th><th>.strm</th><th>上次扫描</th><th style="text-align:right">操作</th></tr></thead>
+                <tbody id="strmAllBody"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1278,6 +1293,11 @@ function strmShow(d) {
   $("strmExt").value = strmData.ext || "";
   $("strmDel").checked = !!strmData.delete_missing;
   $("strmState").textContent = strmData.enabled ? "已启用" : "未启用";
+  if ($("strmWho")) {
+    var who = strmData.account || "";
+    for (var wi = 0; wi < accounts.length; wi++) if (accounts[wi].id === who) who = accounts[wi].name || who;
+    $("strmWho").textContent = who ? ("账号 " + who) : "账号 —";
+  }
 
   var box = $("strmPairs");
   box.innerHTML = "";
@@ -1313,7 +1333,71 @@ function strmShow(d) {
 async function loadStrm() {
   try { var d = await api("/api/strm/status"); strmShow(d.strm); }
   catch (e) { say("msgStrm", e.message, false); }
+  loadStrmAccounts();
 }
+
+/* 全部账号的 STRM 总览：多账号才有意义，单账号直接收起 */
+async function loadStrmAccounts() {
+  var wrap = $("strmAllWrap"), body = $("strmAllBody");
+  if (!wrap || !body) return;
+  if (accounts.length < 2) { wrap.style.display = "none"; return; }
+  wrap.style.display = "";
+  try {
+    var d = await api("/api/strm/accounts");
+    var rows = d.accounts || [];
+    if (!rows.length) { body.innerHTML = '<tr><td colspan="7" class="empty">还没有账号</td></tr>'; return; }
+    var html = "";
+    for (var i = 0; i < rows.length; i++) {
+      var a = rows[i];
+      var isCur = (a.id === curAccount) || (!curAccount && a.default);
+      var name = esc(a.name || a.id) + (a.default ? ' <span class="tag">默认</span>' : "") + (isCur ? ' <span class="tag">当前</span>' : "");
+      var on = a.enabled ? '<span class="chip ok" style="padding:2px 8px">开</span>' : '<span class="chip warn" style="padding:2px 8px">关</span>';
+      if (a.enabled && a.running) on = '<span class="chip" style="padding:2px 8px">扫描中</span>';
+      var last = a.last_at ? esc(String(a.last_at).replace("T", " ").slice(0, 19)) : '<span class="hint">还没扫过</span>';
+      if (a.last_error) last += '<div class="hint" style="color:var(--err)">' + esc(a.last_error) + "</div>";
+      var cnt = a.enabled ? (a.strm_count + " 个") : '<span class="hint">—</span>';
+      if (a.enabled && a.pairs && !a.exists) cnt += ' <span class="hint">（有输出目录不存在）</span>';
+      html += "<tr>" +
+        "<td>" + name + '<div class="hint">' + esc(a.account || "") + "</div></td>" +
+        "<td>" + on + "</td>" +
+        "<td>" + esc(a.mode || "auto") + "</td>" +
+        "<td>" + (a.pairs || 0) + " 条</td>" +
+        "<td>" + cnt + "</td>" +
+        "<td>" + last + "</td>" +
+        '<td style="text-align:right;white-space:nowrap">' +
+          (isCur ? "" : '<button class="sm ghost" data-strm-act="switch" data-id="' + esc(a.id) + '">切到这台</button> ') +
+          (a.enabled ? '<button class="sm ghost" data-strm-act="scan" data-id="' + esc(a.id) + '">立即扫描</button>' : "") +
+        "</td></tr>";
+    }
+    body.innerHTML = html;
+  } catch (e) {
+    body.innerHTML = '<tr><td colspan="7" class="empty">' + esc(e.message) + "</td></tr>";
+  }
+}
+
+/* 总览里的快捷操作：切账号 / 对这一台立即扫描（不切换当前账号） */
+(function () {
+  var body = $("strmAllBody");
+  if (!body) return;
+  body.onclick = async function (ev) {
+    var t = ev.target;
+    while (t && t !== body && !(t.tagName === "BUTTON" && t.dataset && t.dataset.strmAct)) t = t.parentNode;
+    if (!t || t === body) return;
+    var act = t.dataset.strmAct, id = t.dataset.id;
+    if (act === "switch") { await selectAccount(id); showTab("strm"); return; }
+    if (act === "scan") {
+      busy(t, true, "扫描中…");
+      try {
+        var d = await api("/api/strm/scan?account=" + encodeURIComponent(id), { method: "POST", timeout: 900000 });
+        var n = 0;
+        (d.results || []).forEach(function (x) { n += x.total || 0; });
+        toast(d.ok ? ("扫描完成：共 " + n + " 个视频") : ("扫描失败：" + (d.error || "未知错误")), d.ok ? "ok" : "err");
+        loadStrmAccounts();
+      } catch (e) { toast(e.message, "err"); }
+      finally { busy(t, false); }
+    }
+  };
+})();
 
 async function strmSave() {
   var body = {

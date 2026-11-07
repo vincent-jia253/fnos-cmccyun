@@ -2,6 +2,16 @@
 
 版本号与应用内 `manifest` 的 `changelog` 字段保持一致；安装包在 [Releases](https://github.com/vincent-jia253/fnos-cmccyun/releases) 里。
 
+## v1.8.1
+
+STRM 按账号分开管理（后端本来就是逐台的，这次把界面补齐）：
+
+- STRM 页标题标出当前账号，写明开关/映射只作用于该账号。
+- 新增「全部账号的 STRM」总览：`GET /api/strm/accounts` 逐台返回开关、模式、映射数、`.strm` 个数、
+  上次扫描时间与错误；行内可「切到这台」或「立即扫描」（不切换当前账号）。单账号时隐藏。
+- 覆盖：`TestStrmAccountsViewPerAccount` / `TestStrmAccountsEndpoint` / `TestStrmPageShowsAccountScope`，
+  多账号 e2e 54 → 59 项。
+
 ## v1.8.0
 
 控制台加访问密码（默认 `admin` / `admin`，页面内可改）：

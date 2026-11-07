@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
@@ -282,5 +283,129 @@ func TestStrmScanWaitsForMountInAutoMode(t *testing.T) {
 	cfg3.AutoMount = false
 	if strmWaitsMount(cfg3, ac3) {
 		t.Error("没开自动挂载时不该等")
+	}
+}
+
+// 「全部账号的 STRM」总览：每台账号一行，开关/映射数/.strm 总数/上次结果各自独立。
+func TestStrmAccountsViewPerAccount(t *testing.T) {
+	s, root := newMountSvc(t, "")
+	outDir := filepath.Join(root, "strm2")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a.mkv.strm", "b.mkv.strm"} {
+		if err := os.WriteFile(filepath.Join(outDir, name), []byte("/x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s.mu.Lock()
+	s.cfg.Accounts = []config.AccountConfig{
+		{ID: config.DefaultAccountID, Name: "主号", Account: "****9621", MountPoint: filepath.Join(root, "mnt1")},
+		{ID: "acc0123456789ab", Name: "副号", Account: "****8888", MountPoint: filepath.Join(root, "mnt2"),
+			StrmEnabled: true, StrmMode: "path", StrmIntervalMin: 3,
+			StrmPairs: []config.StrmPair{{Cloud: "/01影视", Local: outDir}}},
+	}
+	s.cfg.DefaultAccount = config.DefaultAccountID
+	snap := *s.cfg
+	s.mu.Unlock()
+	if err := config.Save(s.cfgPath, &snap); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := s.StrmAccountsView()
+	if len(rows) != 2 {
+		t.Fatalf("应逐台返回，得到 %d 行", len(rows))
+	}
+	byID := map[string]map[string]any{}
+	for _, r := range rows {
+		byID[r["id"].(string)] = r
+	}
+	main, ok := byID[config.DefaultAccountID]
+	if !ok {
+		t.Fatal("缺默认账号那一行")
+	}
+	second, ok := byID["acc0123456789ab"]
+	if !ok {
+		t.Fatal("缺第二账号那一行")
+	}
+	// 默认账号没开 STRM：0 条映射、0 个 .strm
+	if main["enabled"] != false || main["pairs"].(int) != 0 || main["strm_count"].(int) != 0 {
+		t.Errorf("默认账号不该有 STRM 内容：%v", main)
+	}
+	if second["enabled"] != true {
+		t.Error("第二账号应显示已启用")
+	}
+	if second["pairs"].(int) != 1 {
+		t.Errorf("第二账号映射数应为 1，得到 %v", second["pairs"])
+	}
+	if second["strm_count"].(int) != 2 {
+		t.Errorf("第二账号 .strm 数应为 2，得到 %v", second["strm_count"])
+	}
+	if second["mode"] != "path" || second["interval_min"].(int) != 3 {
+		t.Errorf("模式/间隔不对：%v", second)
+	}
+	if second["exists"] != true {
+		t.Error("输出目录存在，exists 应为 true")
+	}
+	// 输出目录被删掉以后 exists 要变 false（界面上提示"有输出目录不存在"）
+	if err := os.RemoveAll(outDir); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range s.StrmAccountsView() {
+		if r["id"] == "acc0123456789ab" && r["exists"] != false {
+			t.Error("输出目录没了，exists 应为 false")
+		}
+	}
+}
+
+// 接口层：/api/strm/accounts 一次给全部账号（前端总览用）。
+func TestStrmAccountsEndpoint(t *testing.T) {
+	s, root := newMountSvc(t, "")
+	s.mu.Lock()
+	s.cfg.Accounts = append(s.cfg.Accounts, config.AccountConfig{
+		ID: "acc0123456789ab", MountPoint: filepath.Join(root, "mnt2"), StrmEnabled: true,
+		StrmPairs: []config.StrmPair{{Cloud: "/", Local: filepath.Join(root, "out2")}},
+	})
+	snap := *s.cfg
+	s.mu.Unlock()
+	if err := config.Save(s.cfgPath, &snap); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/strm/accounts", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 %d", rec.Code)
+	}
+	var body struct {
+		OK       bool             `json:"ok"`
+		Accounts []map[string]any `json:"accounts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.OK || len(body.Accounts) != 2 {
+		t.Fatalf("应返回两台，得到 ok=%v n=%d", body.OK, len(body.Accounts))
+	}
+	if body.Accounts[1]["id"] != "acc0123456789ab" {
+		t.Errorf("第二行 id 不对：%v", body.Accounts[1]["id"])
+	}
+}
+
+// 界面必须给出「这是哪个账号」和总览表，且不再把 STRM 说成全局的。
+func TestStrmPageShowsAccountScope(t *testing.T) {
+	for _, want := range []string{
+		`id="strmWho"`,
+		`id="strmAllWrap"`,
+		`id="strmAllBody"`,
+		`/api/strm/accounts`,
+		`data-strm-act="switch"`,
+		`data-strm-act="scan"`,
+		"只作用于这个账号",
+	} {
+		if !strings.Contains(indexHTML, want) {
+			t.Errorf("STRM 页缺 %q", want)
+		}
 	}
 }

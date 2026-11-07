@@ -334,6 +334,57 @@ func (s *Service) strmDue(id string) bool {
 }
 
 // StrmStatus 给控制台用：配置 + 上一轮结果 + 当前模式/挂载状态。
+// StrmAccountsView 是「全部账号的 STRM 一览」：每台账号一行，只给界面要显示的
+// 那几个数（开关 / 模式 / 映射数 / .strm 总数 / 上次结果），不带凭据、不带映射明细。
+//
+// 定时器本来就是逐台判定的（StrmLoop 遍历 accounts、各按自己的间隔），但界面上
+// 一次只能看一台；多账号时想确认「第二台到底扫没扫、生成了几个」得来回切，所以
+// 单独给一份总览。
+func (s *Service) StrmAccountsView() []map[string]any {
+	cfg := s.Config()
+	out := make([]map[string]any, 0, len(cfg.Accounts))
+	for i := range cfg.Accounts {
+		ac := &cfg.Accounts[i]
+		row := map[string]any{
+			"id":           ac.ID,
+			"name":         ac.DisplayName(),
+			"account":      ac.Account,
+			"default":      ac.ID == cfg.DefaultAccount,
+			"enabled":      ac.StrmEnabled,
+			"mode":         strmMode(*ac),
+			"mode_setting": ac.StrmMode,
+			"interval_min": ac.StrmIntervalOr(),
+			"pairs":        len(ac.StrmPairs),
+			"strm_count":   0,
+			"exists":       true,
+			"running":      false,
+			"last_at":      "",
+			"last_error":   "",
+		}
+		total := 0
+		for _, p := range ac.StrmPairs {
+			if st, err := os.Stat(p.Local); err == nil && st.IsDir() {
+				total += countStrm(p.Local)
+			} else {
+				row["exists"] = false
+			}
+		}
+		row["strm_count"] = total
+		s.mu.Lock()
+		a, _, err := s.acctLocked(ac.ID)
+		s.mu.Unlock()
+		if err == nil {
+			a.strmMu.Lock()
+			row["running"] = a.strmRunning
+			row["last_at"] = a.strmLastAt
+			row["last_error"] = a.strmLastErr
+			a.strmMu.Unlock()
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
 func (s *Service) StrmStatus(id string) map[string]any {
 	cfg := s.Config()
 	ac, ok := cfg.AccountByID(id)
@@ -567,6 +618,11 @@ func displayCloud(p string) string {
 
 // registerStrmRoutes 挂控制台接口和播放直链。
 func (s *Service) registerStrmRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/strm/accounts", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"ok": true, "accounts": s.StrmAccountsView(),
+			"current": s.Config().DefaultAccount})
+	})
+
 	mux.HandleFunc("/api/strm/status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true, "strm": s.StrmStatus(accID(r)), "config": s.MaskPtrFor(accID(r))})
 	})

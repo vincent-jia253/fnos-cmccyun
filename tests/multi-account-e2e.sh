@@ -247,6 +247,25 @@ pc=$(grep -c '^PASS' "$ROOT/scan_checks.txt" || true); pc=${pc:-0}
 fc=$(grep -c '^FAIL' "$ROOT/scan_checks.txt" || true); fc=${fc:-0}
 pass=$((pass + pc)); fail=$((fail + fc))
 
+echo "== 4g. 全部账号的 STRM 总览 =="
+curl -s "$API/api/strm/accounts" >"$ROOT/strm_all.json"
+python3 - "$ROOT/strm_all.json" "$ACC2" >"$ROOT/strm_all_checks.txt" <<'STRMALL'
+import json, sys
+d = json.load(open(sys.argv[1])); acc2 = sys.argv[2]
+def chk(n, c): print(("PASS  " if c else "FAIL  ") + n)
+rows = d.get("accounts") or []
+by = {r.get("id"): r for r in rows}
+chk("总览返回两台", len(rows) == 2)
+chk("第二台标着已启用 STRM", by.get(acc2, {}).get("enabled") is True)
+chk("默认账号没开 STRM", by.get("default", {}).get("enabled") is False)
+chk("第二台映射 1 条、模式 path", by.get(acc2, {}).get("pairs") == 1 and by.get(acc2, {}).get("mode") == "path")
+chk("每行都带自己的扫描状态字段", all("last_at" in r and "strm_count" in r for r in rows))
+STRMALL
+sed 's/^/  /' "$ROOT/strm_all_checks.txt"
+pc=$(grep -c '^PASS' "$ROOT/strm_all_checks.txt" || true); pc=${pc:-0}
+fc=$(grep -c '^FAIL' "$ROOT/strm_all_checks.txt" || true); fc=${fc:-0}
+pass=$((pass + pc)); fail=$((fail + fc))
+
 echo "== 5. 删除第二台：只卸它自己 =="
 curl -s -X POST "$API/api/accounts" -H 'Content-Type: application/json' \
      -d "{\"action\":\"delete\",\"id\":\"$ACC2\"}" >"$ROOT/del.json"
