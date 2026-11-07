@@ -376,7 +376,12 @@ func (s *Service) StrmAccountsView() []map[string]any {
 		if err == nil {
 			a.strmMu.Lock()
 			row["running"] = a.strmRunning
-			row["last_at"] = a.strmLastAt
+			// 零值时间直接给空字符串：否则前端会显示成 0001-01-01。
+			if a.strmLastAt.IsZero() {
+				row["last_at"] = ""
+			} else {
+				row["last_at"] = a.strmLastAt.Format(time.RFC3339)
+			}
 			row["last_error"] = a.strmLastErr
 			a.strmMu.Unlock()
 		}

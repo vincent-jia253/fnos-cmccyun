@@ -348,6 +348,10 @@ func TestStrmAccountsViewPerAccount(t *testing.T) {
 	if second["exists"] != true {
 		t.Error("输出目录存在，exists 应为 true")
 	}
+	// 还没扫过时 last_at 必须是空串（零值时间会显示成 0001-01-01）
+	if second["last_at"] != "" || main["last_at"] != "" {
+		t.Errorf("没扫过时 last_at 应为空，得到 %q / %q", second["last_at"], main["last_at"])
+	}
 	// 输出目录被删掉以后 exists 要变 false（界面上提示"有输出目录不存在"）
 	if err := os.RemoveAll(outDir); err != nil {
 		t.Fatal(err)
