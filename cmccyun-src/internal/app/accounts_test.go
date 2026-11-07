@@ -1,9 +1,11 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -249,5 +251,71 @@ func TestDAVDispatchPerAccount(t *testing.T) {
 	}
 	if got := s.DAVInfo("")["path"]; got != "/dav/" {
 		t.Errorf("默认账号的 WebDAV 路径 = %v", got)
+	}
+}
+
+// 两台云盘的 STRM 输出目录隔着账号互相踩：写进对方挂载点 = 往人家云盘上传；
+// 两台共用一个本地目录 = 双方的「删除缺失」互相清文件。这些都得挡住。
+func TestStrmRejectsCrossAccountOutputDir(t *testing.T) {
+	s, root := newMountSvc(t, "")
+	defMount := filepath.Join(root, "mnt1")
+	acct0(s.cfg).MountPoint = defMount
+	snap := s.Config()
+	if err := config.Save(s.cfgPath, &snap); err != nil {
+		t.Fatal(err)
+	}
+
+	media := filepath.Join(root, "media")
+	mnt2 := filepath.Join(media, "mnt2")
+	code, out := acctReq(t, s, http.MethodPost, "/api/accounts",
+		`{"action":"add","name":"二号","mount_point":"`+mnt2+`"}`)
+	if code != http.StatusOK {
+		t.Fatalf("新增账号失败：HTTP %d %v", code, out)
+	}
+	id, _ := out["id"].(string)
+	if id == "" {
+		t.Fatal("没拿到新账号 ID")
+	}
+	pairs := func(dirs ...string) map[string]any {
+		raw := make([]any, 0, len(dirs))
+		for _, d := range dirs {
+			raw = append(raw, map[string]any{"cloud": "01影视", "local": d})
+		}
+		return map[string]any{"pairs": raw}
+	}
+
+	// 1) 第二台的输出目录落进默认账号的挂载点
+	if _, err := s.SetStrm(id, pairs(filepath.Join(defMount, "strm"))); err == nil ||
+		!strings.Contains(err.Error(), "挂载点") {
+		t.Fatalf("允许把输出目录放进另一台的挂载点：%v", err)
+	}
+
+	// 2) 输出目录里面有另一台的挂载点（扫进去会把人家的片也写成 .strm）
+	if _, err := s.SetStrm("", pairs(media)); err == nil ||
+		!strings.Contains(err.Error(), "里面挂着账号") {
+		t.Fatalf("允许输出目录套住另一台的挂载点：%v", err)
+	}
+
+	shared := filepath.Join(root, "strm-out")
+	if err := os.MkdirAll(shared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetStrm(id, pairs(shared)); err != nil {
+		t.Fatalf("正常设置失败：%v", err)
+	}
+
+	// 3) 默认账号也来抢同一个输出目录
+	if _, err := s.SetStrm("", pairs(shared)); err == nil || !strings.Contains(err.Error(), "占用") {
+		t.Fatalf("两台云盘共用了同一个输出目录：%v", err)
+	}
+	// 4) 同一台账号自己填两遍
+	if _, err := s.SetStrm(id, pairs(shared, shared)); err == nil || !strings.Contains(err.Error(), "两次") {
+		t.Fatalf("同一个输出目录填了两次也过：%v", err)
+	}
+
+	// 5) 把挂载点搬到别人 STRM 输出目录上
+	err := s.SetMountPointOf("", context.Background(), shared, SetMountPointOptions{AllowNonEmpty: true})
+	if err == nil || !strings.Contains(err.Error(), "STRM 输出目录") {
+		t.Fatalf("允许把云盘挂到别人的 STRM 输出目录上：%v", err)
 	}
 }

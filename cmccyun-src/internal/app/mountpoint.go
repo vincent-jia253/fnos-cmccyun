@@ -409,6 +409,17 @@ func (s *Service) mountPathConflictLocked(selfID, n string, allowInside bool) er
 		if config.PathsOverlap(n, other.MountPoint) {
 			return fmt.Errorf("%s 和账号「%s」的挂载点（%s）重叠了：两台云盘不能挂在互相包含的目录里", n, other.DisplayName(), other.MountPoint)
 		}
+		// 别的账号 STRM 的输出目录不能落在新挂载点里面——挂上以后 .strm 就成了
+		// 往这台云盘上传文件。
+		for _, pr := range other.StrmPairs {
+			if pr.Local == "" {
+				continue
+			}
+			lp := filepath.Clean(pr.Local)
+			if n == lp || underRoot(lp, n) {
+				return fmt.Errorf("要挂的 %s 里面有账号「%s」的 STRM 输出目录（%s）：挂上之后 .strm 会被写进这台云盘，请换个位置", n, other.DisplayName(), lp)
+			}
+		}
 	}
 	return nil
 }

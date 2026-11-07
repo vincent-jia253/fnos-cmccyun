@@ -395,6 +395,26 @@ func (s *Service) SetStrm(id string, patch map[string]any) (map[string]any, erro
 	cfg := *cur
 	mountPoint := cfg.MountPoint
 	id = cfg.ID
+	// 多账号：别的账号的挂载点和输出目录也要一起看。否则会出现两种烂事：
+	//   1) 把 .strm 写进另一台云盘的挂载点里（等于往人家云盘上传文件）；
+	//   2) 两台云盘往同一个本地目录写（双方的「删除缺失」会互相清对方的文件）。
+	type otherAcct struct {
+		name   string
+		mount  string
+		locals []string
+	}
+	var others []otherAcct
+	for i := range s.cfg.Accounts {
+		o := &s.cfg.Accounts[i]
+		if o.ID == id {
+			continue
+		}
+		oa := otherAcct{name: o.DisplayName(), mount: o.MountPoint}
+		for _, p := range o.StrmPairs {
+			oa.locals = append(oa.locals, p.Local)
+		}
+		others = append(others, oa)
+	}
 	s.mu.Unlock()
 
 	if v, ok := patch["enabled"].(bool); ok {
@@ -450,6 +470,27 @@ func (s *Service) SetStrm(id string, patch map[string]any) (map[string]any, erro
 			}
 			if strings.Contains(local, "\x00") {
 				return nil, fmt.Errorf("输出目录含非法字符")
+			}
+			for _, o := range others {
+				if o.mount != "" {
+					om := filepath.Clean(o.mount)
+					if local == om || strings.HasPrefix(local, om+string(os.PathSeparator)) {
+						return nil, fmt.Errorf("输出目录不能放在账号「%s」的挂载点 %s 里面（会写到那台云盘去）", o.name, om)
+					}
+					if strings.HasPrefix(om, local+string(os.PathSeparator)) {
+						return nil, fmt.Errorf("输出目录 %s 里面挂着账号「%s」的云盘（%s）：扫进去会把那台云盘的片也写成 .strm，还会印进它的目录里", local, o.name, om)
+					}
+				}
+				for _, l := range o.locals {
+					if l == local {
+						return nil, fmt.Errorf("输出目录 %s 已被账号「%s」的 STRM 占用：两台云盘别往同一个目录写 .strm，双方的「删除缺失」会互相清文件", local, o.name)
+					}
+				}
+			}
+			for _, done := range pairs {
+				if done.Local == local {
+					return nil, fmt.Errorf("输出目录填了两次：%s", local)
+				}
 			}
 			pairs = append(pairs, config.StrmPair{Cloud: cloud, Local: local})
 		}
