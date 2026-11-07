@@ -354,6 +354,11 @@ func (s *Service) Handler() http.Handler {
 	// 「云盘浏览」里的写操作（新建文件夹 / 重命名 / 回收站 / 下载 / 上传）
 	s.registerRemoteRoutes(mux)
 
+	// 远程挂载（WebDAV）：控制台接口 + /dav/ 本体。
+	s.registerDAVRoutes(mux)
+	mux.Handle("/dav", s.davHandler())
+	mux.Handle("/dav/", s.davHandler())
+
 	return mux
 }
 

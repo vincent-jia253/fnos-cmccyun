@@ -52,7 +52,30 @@ type Config struct {
 	WebPort   int    `json:"web_port"`
 
 	AutoMount bool `json:"auto_mount"`
+
+	// DAVEnabled 打开内置 WebDAV 服务端（/dav/），供飞牛「远程挂载」等
+	// 标准 WebDAV 客户端使用。和 FUSE 挂载互不影响，可以同时开。
+	DAVEnabled bool `json:"dav_enabled"`
+	// DAVUser / DAVPassword 是 WebDAV 的 BasicAuth 凭据。它刻意和
+	// Authorization 分开：改密码不需要重新扫码登录，泄露了也只影响这一个入口。
+	DAVUser     string `json:"dav_user"`
+	DAVPassword string `json:"dav_password"`
+	// DAVRedirect 让 GET 直接 302 到云盘 CDN 签名链接（不占用 NAS 带宽）。
+	// 用指针是为了区分「没配过」和「配成 false」，默认开。
+	DAVRedirect *bool `json:"dav_redirect,omitempty"`
 }
+
+// DAVRedirectOn reports whether GETs should be answered with a redirect to the
+// signed CDN link instead of being proxied through this process.
+func (c *Config) DAVRedirectOn() bool {
+	if c.DAVRedirect == nil {
+		return true
+	}
+	return *c.DAVRedirect
+}
+
+// DefaultDAVUser 是 WebDAV 的默认用户名；密码在第一次打开开关时随机生成。
+const DefaultDAVUser = "cmccyun"
 
 // Default returns a config with safe defaults.
 func Default() *Config {
@@ -70,6 +93,7 @@ func Default() *Config {
 		WebListen:    "0.0.0.0",
 		WebPort:      19898,
 		AutoMount:    true,
+		DAVUser:      DefaultDAVUser,
 	}
 }
 
@@ -112,6 +136,9 @@ func Load(path string) (*Config, error) {
 	}
 	if c.DirPerm == "" {
 		c.DirPerm = "0777"
+	}
+	if c.DAVUser == "" {
+		c.DAVUser = DefaultDAVUser
 	}
 	return c, nil
 }
@@ -168,5 +195,9 @@ func (c *Config) Mask() map[string]any {
 		"web_listen":        c.WebListen,
 		"web_port":          c.WebPort,
 		"auto_mount":        c.AutoMount,
+		"dav_enabled":       c.DAVEnabled,
+		"dav_user":          c.DAVUser,
+		"dav_redirect":      c.DAVRedirectOn(),
+		"dav_password_set":  c.DAVPassword != "",
 	}
 }

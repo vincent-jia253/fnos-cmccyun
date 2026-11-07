@@ -50,6 +50,10 @@
   默认带 PC 客户端标识，云端单文件上限比网页版宽松得多。
 - **云端也能直接操作**：「云盘浏览」页除了看，还能**新建文件夹 / 上传 / 下载 / 重命名 / 删除**
   （删除是移到云盘回收站，可还原）。这些改动直接作用在云端，挂载目录按目录缓存 TTL（默认 60 秒）同步。
+- **两种挂载方式，自己选**：① 应用直接挂 **FUSE**（挂在「我的文件」里，大文件局部写、省流量）；
+  ② 应用当 **WebDAV 服务端**，在飞牛「文件 → 远程挂载 → 挂载远程文件夹 → WebDAV」里填本机地址，
+  由飞牛自己的 rclone 挂成远程卷。前者适合日常当本地盘用，后者是飞牛原生入口、能直接喂给影视/相册这类应用。
+  两条路都开也行（同一个目录建议别两边同时写）。
 - **残留挂载自愈**：进程被强杀 / 掉电后 `/proc/mounts` 里留下的 `ENOTCONN` 空壳，
   启动或点挂载时自动清理再重挂，并给出一键清理按钮，不会被误认为「已挂载」。
 - **界面**：页签分区、状态卡与气泡提示、按钮加载态与禁用、请求超时有明确报错；深色模式与手机窄屏适配。
@@ -138,6 +142,42 @@ sudo appcenter-cli start cmccyun      # 安装流程通常已自动启动
 
 ---
 
+## 挂载方式二：远程挂载（WebDAV）
+
+除了把云盘直接挂进「我的文件」，应用还内置了一个**标准 WebDAV 服务端**，
+可以喂给飞牛自己的「远程挂载」（底层是 rclone），也可以给任何 WebDAV 客户端用。
+
+1. 控制台 →「**远程挂载**」页 → 勾选「启用 WebDAV 服务」→ 保存（密码会自动生成，可点「重置」）。
+2. 页面上会出现一条形如 `http://192.168.x.x:19898/dav/` 的地址，点「复制地址」。
+3. 飞牛「文件」→ 左侧「远程挂载」→ 右上「挂载远程文件夹」→ 协议选 **WebDAV**，
+   填地址、用户名、密码，远端路径留空（= 云盘根目录），保存。
+4. 飞牛会用 rclone 把它挂成一个卷，出现在「远程挂载」列表里，可以直接拿来建影视库。
+
+命令行验证（NAS 上执行）：
+
+```bash
+rclone lsd :webdav: \
+  --webdav-url http://127.0.0.1:19898/dav/ --webdav-vendor other \
+  --webdav-user cmccyun --webdav-pass "$(rclone obscure '你设的密码')"
+```
+
+**和 FUSE 挂载的取舍**
+
+| | 挂进「我的文件」（FUSE） | 远程挂载（WebDAV） |
+|---|---|---|
+| 谁来挂 | 本应用 | 飞牛自己的 rclone |
+| 大文件局部改写 | 只传改动区块（CD2 式 overlay） | **整文件重传** |
+| 下载路径 | 经本机上云 | 默认 **302 到云盘 CDN**，不占 NAS 带宽 |
+| 能喂给影视/相册 | 要自己把路径加进库 | 飞牛原生入口，直接选这个远程卷 |
+| 依赖 | 应用进程 + FUSE | 应用进程 + HTTP 端口 |
+
+安全说明：WebDAV 有独立的用户名/密码（BasicAuth，常数时间比较），跟登录授权（`Authorization`）**完全分开**——
+改密码不用重新扫码，泄露了也只影响这一个入口；关掉开关后 `/dav/` 直接返回 503。
+默认「下载 302 到 CDN」会在响应里把一条 15 分钟有效的云盘签名链接交给客户端（这也是它快的原因），
+不想暴露可以在这页把该选项关掉，改成由本机代理转发。
+
+---
+
 ## 构建
 
 依赖：[Go](https://go.dev/) 1.24+、[fnpack](https://developer.fnnas.com/)（飞牛官方打包工具）、`git`。
@@ -145,7 +185,7 @@ sudo appcenter-cli start cmccyun      # 安装流程通常已自动启动
 ```bash
 git clone https://github.com/vincent-jia253/fnos-cmccyun.git
 cd fnos-cmccyun
-GO=go VERSION=1.4.0 ./build.sh     # 交叉编译双架构二进制 → 同步 manifest 版本 → fnpack build
+GO=go VERSION=1.5.0 ./build.sh     # 交叉编译双架构二进制 → 同步 manifest 版本 → fnpack build
 # 产物：./cmccyun.fpk
 ```
 
@@ -154,7 +194,7 @@ GO=go VERSION=1.4.0 ./build.sh     # 交叉编译双架构二进制 → 同步 m
 ```bash
 cd cmccyun-src
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
-  -ldflags "-s -w -X github.com/vincent-jia253/fnos-cmccyun/internal/app.Version=1.4.0" -o cmccyun .
+  -ldflags "-s -w -X github.com/vincent-jia253/fnos-cmccyun/internal/app.Version=1.5.0" -o cmccyun .
 ```
 
 ---
@@ -244,11 +284,17 @@ v1.3.0 起启动与点挂载时都会自动清理这类残留，上面只是兜�
 
 ## 已知取舍
 
+- **升级后版本号没变（还是旧界面）**：飞牛的应用升级在旧进程仍占用二进制文件时，
+  可能只更新了清单而没有替换可执行文件。做法：`sudo appcenter-cli stop cmccyun` 之后再装一次；
+  还不行就把新包里的 `cmccyun-linux-amd64` 直接 `cp` 到 `/volN/@appcenter/cmccyun/` 覆盖（先停应用），
+  再 `sudo appcenter-cli start cmccyun`。这也是在真机上迭代时最省事的姿势。
 - **管理台没有鉴权**，监听 `0.0.0.0:19898`，仅建议在可信内网使用。
   想收紧可在 `config.json` 里把 `web_listen` 改成 `127.0.0.1`（从此只能从 NAS 本机访问）。
 - **守护进程以 root 运行**（为了能挂到任意位置，与 CloudDrive2 等同机方案一致）；
   挂载内容的可见性由配置里的 uid/gid 与权限位决定。介意的话可在配置目录放 `run_as` 文件指定普通用户
   （代价：只能挂在该用户有权限的位置）。
+- **WebDAV 那条路改大文件要整文件重传**：WebDAV 的写是「写完再上传」，没有 FUSE 那条路的
+  overlay 局部写优化。日常看片、加文件没感觉，反复改同一个大文件就别走远程挂载。
 - **覆盖写入仍有上传流量**：服务端要求顺序分片，所以局部改写上传量约等于文件大小（省的是本地磁盘与整文件下载）。
 - 非官方接口不保证长期可用；接口失效时改动集中在 `cmccyun-src/internal/api/`。
 - `CMCCYUN_DEBUG_FAKE=<本地目录>` 是调试后门（挂本地目录而非云盘），**正式环境不要设置**。

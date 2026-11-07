@@ -390,6 +390,7 @@ const indexHTML = `<!DOCTYPE html>
       <button class="tab act" data-tab="mount">挂载设置</button>
       <button class="tab" data-tab="auth">授权</button>
       <button class="tab" data-tab="browse">云盘浏览</button>
+      <button class="tab" data-tab="dav">远程挂载</button>
       <button class="tab" data-tab="logs">运行日志</button>
     </nav>
 
@@ -578,6 +579,65 @@ const indexHTML = `<!DOCTYPE html>
       </div>
     </section>
 
+    <!-- ===== 远程挂载（WebDAV） ===== -->
+    <section class="panel" id="tab-dav">
+      <div class="card">
+        <div class="hd">
+          <h2>远程挂载（WebDAV）</h2><span class="tag" id="davState">未启用</span>
+          <span class="sub">让飞牛「远程挂载」直接挂这块云盘，和「我的文件」里的挂载并列，用户自己选</span>
+        </div>
+        <div class="bd">
+          <div class="checkline" style="height:34px">
+            <input id="davEnabled" type="checkbox" />
+            <span>启用 WebDAV 服务（地址 <code class="k">/dav/</code>，账号密码独立于登录授权）</span>
+          </div>
+          <div class="grid" style="margin-top:12px">
+            <div><label>用户名</label><input id="davUser" spellcheck="false" /></div>
+            <div>
+              <label>密码</label>
+              <div class="row nowrap">
+                <input id="davPass" spellcheck="false" />
+                <button id="btnDavReset" style="flex:0 0 auto">重置</button>
+              </div>
+            </div>
+          </div>
+          <label style="margin-top:12px">连接地址</label>
+          <div class="row nowrap">
+            <input id="davURL" spellcheck="false" readonly />
+            <button id="btnDavCopy" style="flex:0 0 auto">复制地址</button>
+            <button id="btnDavCopyAuth" style="flex:0 0 auto">复制账号密码</button>
+          </div>
+          <div id="davURLs" class="hint" style="margin-top:7px"></div>
+          <div class="checkline" style="height:34px">
+            <input id="davRedir" type="checkbox" />
+            <span>下载直接 302 到云盘 CDN（推荐：不占 NAS 带宽，4K 拖动进度条正常）</span>
+          </div>
+          <div class="actions">
+            <button id="btnDavSave" class="primary">保存</button>
+          </div>
+          <div id="msgDav" class="msg"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="hd"><h2>在飞牛里怎么填</h2><span class="sub">文件 → 远程挂载 → 挂载远程文件夹 → WebDAV</span></div>
+        <div class="bd">
+          <ol class="steps">
+            <li>打开飞牛「文件」，左侧点<b>远程挂载</b>，右上角<b>挂载远程文件夹</b>。</li>
+            <li>协议选 <b>WebDAV</b>，地址填上面那条（形如 <code class="k">http://192.168.x.x:19898/dav/</code>）。</li>
+            <li>用户名、密码填上面的，远端路径留空（就是云盘根目录），保存。</li>
+            <li>飞牛会用 rclone 把它挂成一个卷，出现在「远程挂载」列表里，可以直接拿来建影视库。</li>
+          </ol>
+          <div class="hint">
+            两种挂载方式的取舍：<b>「我的文件」里的挂载</b>是本应用直接挂的 FUSE，
+            支持大文件局部写、省流量；<b>远程挂载（WebDAV）</b> 走飞牛自己的 rclone，
+            改文件要整文件重传，但胜在是飞牛原生入口、能直接喂给影视/相册这类应用。
+            同一个云盘目录别两边同时写：两边缓存各自独立，会互相看不见。
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- ===== 日志 ===== -->
     <section class="panel" id="tab-logs">
       <div class="card">
@@ -749,6 +809,7 @@ function showTab(name) {
     panels[j].classList.toggle("act", panels[j].id === "tab-" + name);
   }
   if (name === "logs") loadLogs();
+  if (name === "dav") loadDav();
   if (name === "browse" && !browseLoaded && lastSt && lastSt.has_token) { browseLoaded = true; browse("/"); }
   // 第一次进「授权」页又没授权时，直接把二维码摆出来——少点一次按钮
   if (name === "auth" && !qrAutoStarted && lastSt && !lastSt.has_token) { qrAutoStarted = true; qrStart(); }
@@ -756,6 +817,82 @@ function showTab(name) {
 document.querySelectorAll(".tab").forEach(function (b) {
   b.onclick = function () { showTab(b.dataset.tab); };
 });
+
+/* ---------------- 远程挂载（WebDAV） ---------------- */
+var davData = null;
+
+function davShow(d) {
+  davData = d || {};
+  $("davEnabled").checked = !!davData.enabled;
+  $("davUser").value = davData.user || "";
+  $("davPass").value = davData.password || "";
+  $("davRedir").checked = davData.redirect !== false;
+  var urls = davData.urls || [];
+  $("davURL").value = urls[0] || "";
+  var extra = "";
+  for (var i = 1; i < urls.length; i++) extra += "<div>" + esc(urls[i]) + "</div>";
+  $("davURLs").innerHTML = urls.length > 1
+    ? "多网卡：首选上面那条，其余是 " + extra
+    : (urls.length ? "填这条就行（本机网卡的局域网地址）。" : "还没读到本机 IP。");
+  $("davState").textContent = davData.enabled ? "已启用" : "未启用";
+}
+
+async function loadDav() {
+  try { var d = await api("/api/dav/info"); davShow(d.dav); }
+  catch (e) { say("msgDav", e.message, false); }
+}
+
+function davCopy(text, btn) {
+  var done = function () {
+    if (!btn) return;
+    var old = btn.innerHTML;
+    btn.innerHTML = "已复制";
+    setTimeout(function () { btn.innerHTML = old; }, 1400);
+  };
+  var fallback = function () {
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed"; ta.style.left = "-9999px";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); done(); } catch (e) { say("msgDav", "浏览器不让复制，请手动选中输入框里的内容", false); }
+    document.body.removeChild(ta);
+  };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(done).catch(fallback);
+  } else {
+    fallback();  // 飞牛控制台多半是 http，clipboard API 不可用，走 execCommand
+  }
+}
+
+async function davSave(patch, btn, okText) {
+  var body = Object.assign({
+    enabled: $("davEnabled").checked,
+    user: $("davUser").value,
+    password: $("davPass").value,
+    redirect: $("davRedir").checked
+  }, patch || {});
+  busy(btn, true);
+  try {
+    var d = await api("/api/dav/config", { method: "POST", body: JSON.stringify(body) });
+    davShow(d.dav);
+    say("msgDav", okText || (body.enabled ? "已保存，可以把上面的地址填进飞牛了" : "已保存，WebDAV 已关闭"), true);
+  } catch (e) {
+    say("msgDav", e.message, false);
+  } finally {
+    busy(btn, false);
+  }
+}
+
+$("btnDavSave").onclick = function () { davSave(null, this); };
+$("btnDavReset").onclick = function () {
+  if (!confirm("重置密码后，飞牛里已经挂着的连接会失效，需要重新填一次。确定重置？")) return;
+  davSave({ regenerate: true }, this, "密码已重置，请重新填进飞牛");
+};
+$("btnDavCopy").onclick = function () { davCopy($("davURL").value, this); };
+$("btnDavCopyAuth").onclick = function () {
+  davCopy("地址：" + $("davURL").value + "\n用户名：" + $("davUser").value + "\n密码：" + $("davPass").value, this);
+};
 
 /* ---------------- 状态刷新（含挂载状态） ---------------- */
 async function refresh() {

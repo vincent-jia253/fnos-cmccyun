@@ -17,6 +17,7 @@ import (
 
 	"github.com/vincent-jia253/fnos-cmccyun/internal/api"
 	"github.com/vincent-jia253/fnos-cmccyun/internal/config"
+	"github.com/vincent-jia253/fnos-cmccyun/internal/dav"
 	"github.com/vincent-jia253/fnos-cmccyun/internal/vfs"
 )
 
@@ -51,6 +52,9 @@ type Service struct {
 	qrMu  sync.Mutex
 	qr    map[string]*qrSession
 	qrSeq uint64
+	// davFS 是内置 WebDAV 服务端的文件系统（见 dav.go）。缓存跟着它走，
+	// 换账号/改只读时置空重建。
+	davFS *dav.FS
 }
 
 // New loads the configuration and prepares logging.
@@ -389,6 +393,8 @@ func (s *Service) clientLocked() (*api.Client, error) {
 		return nil, err
 	}
 	s.client = c
+	// 新客户端意味着新会话：WebDAV 那层的目录缓存必须跟着作废。
+	s.davFS = nil
 	return c, nil
 }
 

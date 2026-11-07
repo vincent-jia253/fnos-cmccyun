@@ -2,6 +2,37 @@
 
 版本号与应用内 `manifest` 的 `changelog` 字段保持一致；安装包在 [Releases](https://github.com/vincent-jia253/fnos-cmccyun/releases) 里。
 
+## v1.5.0
+
+**新增「远程挂载（WebDAV）」：换一条完全不同的挂载路线，让飞牛自己来挂。**
+
+上个版本用户问「能不能把云盘也塞进飞牛『远程挂载』里那三张网盘卡片」。逆向结论是
+那三张卡片写死在闭源的 `cloud_storage_dav` 里、没有第三方注册接口，硬塞会被系统升级覆盖；
+但「远程挂载 → 挂载远程文件夹」对用户是开放的，**支持 WebDAV**（底层 rclone）。
+于是这个版本让应用自己当 WebDAV 服务端——不碰飞牛任何二进制，升级安全。
+
+- 新增 `internal/dav`：把云盘文件系统适配成标准 WebDAV（`golang.org/x/net/webdav`）。
+  - 路径解析靠 `file/list` 逐级下钻（139 没有「路径 → fileId」接口），目录列表带 5 秒缓存，
+    否则影视/Emby 刮一个库就是几千次请求。
+  - 读：`Download(id, offset, -1)` 真流；`Seek` 只挪偏移、下一次读才重开流，
+    所以 `http.ServeContent` 的 `Seek(0,End)` 探测不花网络。
+  - 写：先落本地 stage 临时文件，`Close` 时整文件分片上传。
+  - 删除进**云端回收站**（可还原）；`MOVE` 同时覆盖「改名」和「换目录」两种语义。
+- 控制台新增「**远程挂载**」页：开关、独立用户名/密码（可一键重置）、地址列表与一键复制、
+  「下载 302 到 CDN」开关、以及在飞牛里怎么填的四步教程 + 两种挂载方式取舍说明。
+- `GET/HEAD` 默认 **302 到云盘 CDN 签名链接**：4K 播放不绕 NAS 带宽，`Range` 由客户端带给 CDN
+  （实测返回 206，拖进度条正常）；不想暴露签名链接可以在页面上关掉，改成本机代理转发。
+- 只读模式在 HTTP 层就拦（403），不再让 webdav 库把 `os.ErrPermission` 翻成 404 让人误判路径写错。
+- 密码与登录授权完全隔离：`dav_user` / `dav_password` 独立于 `Authorization`，
+  重置密码不影响挂载；关掉开关 `/dav/` 返回 503。
+- 真机互操作实测（rclone 1.x）：
+  `lsd` 列根目录 6 项 → `mkdir` → 上传 2 MB（md5 一致）→ `cat` 回读（md5 一致）→
+  `--offset/--count` 分段读（md5 一致）→ `moveto` 改名 → `copyto` 跨名复制 → `purge` 清空（进回收站）。
+- 测试：新增 `internal/dav/dav_test.go`（PUT/GET 往返、Range、PROPFIND+反向 Seek、MOVE/DELETE、
+  只读拒绝、目录缓存计数、根解析）与 `internal/app/dav_test.go`（默认关闭、开关生成密码、
+  BasicAuth 门禁、只读拦截 403、接口只收 POST、页面元素齐全）。
+  全量 **87 项**（原 74 项）在 `CGO_ENABLED=1` 下全绿。
+
 ## v1.4.0
 
 **新增扫码登录**，同时完整保留手工粘贴——两条路都留着，谁方便用谁。
