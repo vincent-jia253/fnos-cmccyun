@@ -72,6 +72,7 @@ cat >"$ROOT/etc/config.json" <<JSON
   "log_file": "${ROOT}/var/cmccyun.log",
   "web_listen": "127.0.0.1",
   "web_port": ${WEB_PORT},
+  "web_auth_disabled": true,
   "auto_mount": true
 }
 JSON

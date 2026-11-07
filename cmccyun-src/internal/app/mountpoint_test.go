@@ -20,6 +20,9 @@ func newMountSvc(t *testing.T, mountPoint string) (*Service, string) {
 	cfgPath := filepath.Join(root, "@appconf", "config.json")
 	cfg := config.Default()
 	acct0(cfg).MountPoint = mountPoint
+	// 单元测试直接打 s.Handler()，v1.8.0 起控制台默认带登录门：这里统一关掉，
+	// 登录门自己的行为由 webauth_test.go 单独覆盖（那边会显式打开）。
+	cfg.WebAuthDisabled = true
 	cfg.StageDir = filepath.Join(root, "@appdata", "staging")
 	cfg.LogFile = filepath.Join(root, "@appdata", "cmccyun.log")
 	if err := config.Save(cfgPath, cfg); err != nil {

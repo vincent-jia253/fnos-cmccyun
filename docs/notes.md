@@ -5,7 +5,7 @@
 换挂载点、切只读、看日志。
 
 - 应用名：`cmccyun`（显示名「移动云盘」）
-- 版本：**1.7.4**，平台 `all`（内置 linux/amd64 与 linux/arm64 两个二进制，CGO_ENABLED=0，无外部依赖）
+- 版本：**1.8.0**，平台 `all`（内置 linux/amd64 与 linux/arm64 两个二进制，CGO_ENABLED=0，无外部依赖）
 - 安装包：`./build.sh` 产出的 `cmccyun.fpk`（发布版见仓库 Releases，md5 记在对应的 Release 说明里）
 - 管理台端口：**19898**（`http://<NAS_IP>:19898/`）
 
@@ -36,6 +36,28 @@
    > （「授权」页会显示「上次自动续期 …」）。徽标在 >15 天时是正常色、<15 天变黄提示。
    > **实测（2026-10-12 真实账号）**：手动点「刷新令牌」→ 新到期 2026-11-11 00:40（整整 30.0 天），
    > 新令牌已写回 `config.json`，随后用新凭据列云端目录 / 真读文件都正常 —— 续期确实有效，30 天到期不会断。
+
+### v1.8.0 变更：控制台访问密码（默认 admin/admin）
+
+以前 `19898` 对局域网全开：任何人打开 `http://<NAS>:19898/` 就能改挂载点、看「授权剩余天数」、
+把配置导出去。这一版给控制台加了一道登录门：
+
+- **默认用户名 / 密码都是 `admin`**，进去后在「挂载设置 → 控制台访问密码」里改（也能改登录名）；
+  还在用默认密码时，那一栏会挂一个「还在用默认密码」的提示。
+- **密码只存哈希**：PBKDF2-HMAC-SHA256（16 字节随机盐、120,000 次迭代），`config.json` 里没有明文。
+- **会话**：HMAC-SHA256 签名的无状态 cookie（HttpOnly + SameSite=Lax，7 天）。签名密钥由「用户名 + 密码哈希」
+  派生 —— 所以改完密码，其它设备上的旧会话**立刻失效**，当前会话自动换新票。
+- **不受影响的两处**：`/dav/`（WebDAV 有各账号自己的用户名密码）与 `/api/strm/play`（STRM 直链自带 `k` 口令）。
+  播放器、Emby、rclone 的配置都不用改。
+- **登录失败会记日志**（含来源地址），方便看有没有人在试密码。
+- 忘了密码：删掉 `config.json` 里的 `web_password` 再重启，回到默认 `admin`；
+  纯内网直连（不接受登录）可以设 `"web_auth_disabled": true`（测试脚本就是这么跑的）。
+
+测试 121 → **127 项**（`TestConsolePasswordHashAndVerify`、`TestConsoleSessionToken`、`TestConsoleAuthGate`、
+`TestConsolePasswordChange`、`TestConsoleAuthCanBeDisabled`、`TestConsoleAuthUIPresent`），
+新增 `tests/console-auth-e2e.sh` **23 项**（起真守护进程：未登录 302/401、默认密码可登、改密码后旧 cookie 失效、
+旧密码登不进、新密码可用、配置里只有哈希、`/dav/` 与 STRM 直链不受影响）；`functional.sh` 23/23、
+`strm-e2e.sh` 13/13、`multi-account-e2e.sh` 54/54、`auth-recovery-demo.sh` 9/9。
 
 ### v1.7.4 变更：账号页把动作摆到明面上（含凭据导出 / 按账号看日志 / 单账号扫描）
 
@@ -606,7 +628,8 @@ GO=go VERSION=1.3.2 ./build.sh   # 需要 Go 1.24+ 与 fnpack
 | 脚本 | 作用 | 最近一次结果 |
 |---|---|---|
 | `functional.sh` | 对本地假后端跑端到端 FUSE 测试：读一致性（文本 / 3 MB / 25 MB）、10 次管道读、4 路并发读、Python `pread` 偏移扫描、写/改名/删除、12 MB 上传、30 MB 文件**局部改写**（校验暂存占用 <1 MB）、`ftruncate` 缩容 | **23 passed, 0 failed** |
-| `go test ./internal/...` | 单元测试：extents 区间合并、覆盖写入不整文件下载、截断语义、新建文件先 flush 后 write、令牌续期与形状回退、鉴权失败续期重试（含并发只续期一次、续期失败退避、新授权立即生效）、两处锁回归、**死锁看门狗（5 秒超时扫全部控制台入口 `Update(mount_point)` / `CheckMountPath` / `Status`…，超时即失败并打印 goroutine 栈）**、过期预签名地址重签、`vfs.Dead`（`ENOTCONN` 残留挂载识别）、**界面类名回归（`.sp` 只能当按钮里的加载指示器，不许当占位元素用）**、**「授权剩余天数」的悬停说明与可见文字解释必须存在（v1.3.2）**、**STRM 直链参数只拼一次（单问号）/ auto 模式挂载未就绪时跳过扫描且不记到点时间（v1.7.2）**、**挂载位置规则校验 / 非空目录确认 / 卷外与卷根拒绝 / 目录浏览与新建 / 切换位置后旧位置已卸载 / `mounted_at` 重启后可恢复 / 旧位置僵尸挂载自救 / 挂载点内部路径的识别与「先卸下再挪」/ 挂载点内禁止新建目录** | **121 tests, 全绿**（v1.7.4；`-race` 亦通过；FUSE 相关用例需 `CMCCYUN_TEST_FUSE=1`） |
+| `go test ./internal/...` | 单元测试：extents 区间合并、覆盖写入不整文件下载、截断语义、新建文件先 flush 后 write、令牌续期与形状回退、鉴权失败续期重试（含并发只续期一次、续期失败退避、新授权立即生效）、两处锁回归、**死锁看门狗（5 秒超时扫全部控制台入口 `Update(mount_point)` / `CheckMountPath` / `Status`…，超时即失败并打印 goroutine 栈）**、过期预签名地址重签、`vfs.Dead`（`ENOTCONN` 残留挂载识别）、**界面类名回归（`.sp` 只能当按钮里的加载指示器，不许当占位元素用）**、**「授权剩余天数」的悬停说明与可见文字解释必须存在（v1.3.2）**、**STRM 直链参数只拼一次（单问号）/ auto 模式挂载未就绪时跳过扫描且不记到点时间（v1.7.2）**、**挂载位置规则校验 / 非空目录确认 / 卷外与卷根拒绝 / 目录浏览与新建 / 切换位置后旧位置已卸载 / `mounted_at` 重启后可恢复 / 旧位置僵尸挂载自救 / 挂载点内部路径的识别与「先卸下再挪」/ 挂载点内禁止新建目录** | **127 tests, 全绿**（v1.8.0；`-race` 亦通过；FUSE 相关用例需 `CMCCYUN_TEST_FUSE=1`） |
+| `console-auth-e2e.sh` | **控制台访问密码端到端**：真守护进程 + 登录门开着，校验未登录时页面 302 到 `/login`、接口一律 401；默认 `admin/admin` 可登录并拿到 cookie；改密码时旧密码错/两次不一致被拒，改成功后旧 cookie 立刻失效、旧密码登不进、新密码可用；`config.json` 只存 `pbkdf2-sha256$…` 哈希（无明文）；`/dav/` 与 `/api/strm/play` 不被登录门拦 | **23 passed, 0 failed** |
 | `multi-account-e2e.sh` | **多账号端到端**：假后端上让**一个进程同时挂两棵 FUSE 树**（`mnt1` 读写 / `mnt2` 只读），校验两棵都在 `/proc/self/mountinfo`、目录列表与 `dd 64K` 都正常、只读是**分账号**的（只读那棵 `touch` 失败、读写那棵成功）、`/api/status` 一次报两台且 `read_only` 各自正确、`?account=<id>` 只描述那一台、**按账号看日志**（过滤后不含另一台的挂载点/STRM 输出）、**单账号扫描**（只打到那一台、last_at 落到该账号、没云端 client 时如实报错）、**WebDAV 凭据分账号**（`/dav/` 只认默认账号、`/dav/<id>/` 只认自己那台，串号/无凭据一律 401、`/dav/01影视/` 落回默认账号）、**全部重挂**逐台成功且两棵仍挂、**按账号导出**默认脱敏（`include_auth=1` 才带凭据、文件名带账号 ID）、删除第二台**只卸它自己**（`mnt1` 仍在且仍可读、`mounted_at` 清掉该账号、账号数回到 1） | **54 passed, 0 failed** |
 | `restart.sh` | 用假后端（`CMCCYUN_DEBUG_FAKE`）把守护进程挂在 `/tmp/cct/mnt`，管理台 19899 | ok |
 | `fnos-lifecycle.sh` | 在真机上验证 fnOS 生命周期：status 3 → start → status 0 → 挂载可见 → 跨用户读/写 → 幂等 start → stop → 0 残留挂载 | 全部通过 |

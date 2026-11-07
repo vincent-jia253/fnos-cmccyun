@@ -2,6 +2,18 @@
 
 版本号与应用内 `manifest` 的 `changelog` 字段保持一致；安装包在 [Releases](https://github.com/vincent-jia253/fnos-cmccyun/releases) 里。
 
+## v1.8.0
+
+控制台加访问密码（默认 `admin` / `admin`，页面内可改）：
+
+- 打开 `http://<NAS>:19898/` 先登录；未登录时页面 302 到 `/login`，`/api/*` 一律 401。
+- 密码只存 PBKDF2-HMAC-SHA256 哈希（16 字节盐、120k 迭代），`config.json` 无明文。
+- 会话为 HMAC 签名 cookie（HttpOnly、SameSite=Lax、7 天），密钥由用户名+密码哈希派生 → 改密码即让旧会话全部失效。
+- `/dav/`（WebDAV 自己的账号密码）与 `/api/strm/play`（直链自带 `k` 口令）不受影响。
+- 登录失败写日志（含来源）；忘了密码删掉 `web_password` 重启回到默认；纯内网可用 `web_auth_disabled` 关掉。
+
+测试 121 → 127 项，新增 `tests/console-auth-e2e.sh` 23 项；`functional.sh` 23/23、`multi-account-e2e.sh` 54/54。
+
 ## v1.7.4
 
 账号页把动作摆到明面上，并补两件按账号的操作：

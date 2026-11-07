@@ -457,6 +457,27 @@ const indexHTML = `<!DOCTYPE html>
             <button id="btnPick2">选择位置…</button>
           </div>
           <div id="msgCfg" class="msg"></div>
+
+          <div class="hd" style="margin-top:22px;padding-top:16px;border-top:1px solid rgba(127,127,127,.18)">
+            <h2 style="font-size:15px">控制台访问密码</h2>
+            <span class="chip warn" id="webPassDefault" style="display:none;padding:2px 8px">还在用默认密码</span>
+            <span class="sub">打开控制台要输密码；默认 <b>admin / admin</b>，改完即时生效</span>
+          </div>
+          <div class="grid" style="margin-top:10px">
+            <div><label>当前密码</label><input id="webPassCur" type="password" autocomplete="current-password" placeholder="默认 admin" /></div>
+            <div><label>新密码（至少 4 位）</label><input id="webPassNew" type="password" autocomplete="new-password" /></div>
+            <div><label>再输一次新密码</label><input id="webPassNew2" type="password" autocomplete="new-password" /></div>
+            <div><label>登录名</label><input id="webUser" spellcheck="false" placeholder="admin" /></div>
+          </div>
+          <div class="actions">
+            <button id="btnWebPass" class="primary">修改密码 / 登录名</button>
+            <button id="btnLogout" class="ghost">退出登录</button>
+          </div>
+          <div id="msgWebPass" class="msg"></div>
+          <div class="hint" style="margin-top:8px">
+            <code class="k">/dav/</code>（WebDAV）与 STRM 直链不受这个密码影响：它们各自有自己的账号和口令。<br>
+            忘了密码：删掉 <code class="k">config.json</code> 里的 <code class="k">web_password</code> 再重启，回到默认 admin。
+          </div>
         </div>
       </div>
     </section>
@@ -954,6 +975,42 @@ document.querySelectorAll(".tab").forEach(function (b) {
   b.onclick = function () { showTab(b.dataset.tab); };
 });
 
+/* ---------------- 控制台访问密码 ---------------- */
+(function () {
+  var btn = $("btnWebPass");
+  if (btn) btn.onclick = async function () {
+    var cur = $("webPassCur").value, nw = $("webPassNew").value, nw2 = $("webPassNew2").value;
+    var user = $("webUser").value.trim();
+    if (!cur) { say("msgWebPass", "先填当前密码", false); $("webPassCur").focus(); return; }
+    if (nw && nw !== nw2) { say("msgWebPass", "两次输入的新密码不一致", false); return; }
+    if (nw && nw.length < 4) { say("msgWebPass", "新密码至少 4 位", false); return; }
+    if (!nw && !user) { say("msgWebPass", "新密码和登录名至少改一个", false); return; }
+    busy(btn, true, "保存中…");
+    try {
+      var d = await api("/api/console-password", { method: "POST", body: JSON.stringify({ current: cur, password: nw, confirm: nw2, user: user }) });
+      say("msgWebPass", d.message || "已保存", true);
+      $("webPassCur").value = ""; $("webPassNew").value = ""; $("webPassNew2").value = "";
+      toast("控制台密码已更新", "ok");
+      await refresh();
+    } catch (e) { say("msgWebPass", e.message, false); }
+    finally { busy(btn, false); }
+  };
+  var lo = $("btnLogout");
+  if (lo) lo.onclick = async function () {
+    if (!confirm("退出登录？之后打开控制台要重新输密码。")) return;
+    try { await api("/api/logout", { method: "POST" }); } catch (e) {}
+    window.location = "/login";
+  };
+})();
+
+/* 顶栏 / 设置里提示「还在用默认密码」 */
+var webPassSet = true;
+function refreshConsoleAuthHint() {
+  var chip = $("webPassDefault");
+  if (!chip) return;
+  chip.style.display = webPassSet ? "none" : "";
+}
+
 /* ---------------- 账号（多账号切换 / 管理） ---------------- */
 function acctExists(id) {
   for (var i = 0; i < accounts.length; i++) if (accounts[i].id === id) return true;
@@ -1390,6 +1447,8 @@ async function refresh() {
   }
   var st = d.status || {};
   cfg = d.config || {};
+  webPassSet = !!cfg.web_password_set;
+  refreshConsoleAuthHint();
   mounted = !!st.mounted;
   lastSt = st;
   accounts = d.accounts || [];

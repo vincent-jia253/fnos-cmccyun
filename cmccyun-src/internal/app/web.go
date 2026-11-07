@@ -407,7 +407,15 @@ func (s *Service) Handler() http.Handler {
 	mux.Handle("/dav", s.davDispatch())
 	mux.Handle("/dav/", s.davDispatch())
 
-	return mux
+	// 控制台访问密码（v1.8.0）：登录页 + 登录/退出 + 改密码。
+	// 这几个路由在登录门之外（否则永远登不进去），见 consoleAuthExempt。
+	mux.HandleFunc("/login", s.handleLoginPage)
+	mux.HandleFunc("/api/login", s.handleLogin)
+	mux.HandleFunc("/api/logout", s.handleLogout)
+	mux.HandleFunc("/api/console-password", s.handleConsolePassword)
+
+	// 整个控制台（除 /dav/ 与 /api/strm/play）都在这道门后面。
+	return s.consoleAuth(mux)
 }
 
 // Listen starts the console HTTP server.
@@ -443,6 +451,13 @@ func dedup(in []string) []string {
 		out = append(out, v)
 	}
 	return out
+}
+
+// writeJSONStatus 是带状态码的 writeJSON（登录门回 401 用）。
+func writeJSONStatus(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

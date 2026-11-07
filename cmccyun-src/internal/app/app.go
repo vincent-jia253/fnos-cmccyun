@@ -267,6 +267,29 @@ func (s *Service) AccountMask(id string) (map[string]any, error) {
 	return ac.MaskAccount(), nil
 }
 
+// UpdateConsoleAuth 改控制台登录名 / 密码哈希（"" 表示不改这一项）。
+//
+// 调用方（handleConsolePassword）负责先把密码哈希算好：这里只管落盘，
+// 免得把明文密码在这条路径上多传一次。
+func (s *Service) UpdateConsoleAuth(user, passwordHash string) error {
+	s.mu.Lock()
+	if u := strings.TrimSpace(user); u != "" {
+		s.cfg.WebUser = u
+	}
+	if passwordHash != "" {
+		s.cfg.WebPassword = passwordHash
+	}
+	snapshot := *s.cfg
+	s.mu.Unlock()
+	if err := config.Save(s.cfgPath, &snapshot); err != nil {
+		return err
+	}
+	if passwordHash != "" {
+		s.logf("控制台密码已更新（其它设备上的登录会话已失效）")
+	}
+	return nil
+}
+
 // ConfigPath returns the on-disk config location.
 func (s *Service) ConfigPath() string { return s.cfgPath }
 

@@ -49,6 +49,14 @@ type Config struct {
 	WebListen string `json:"web_listen"`
 	WebPort   int    `json:"web_port"`
 
+	// ---- 控制台访问密码（v1.8.0）----
+	// WebUser 是控制台登录名，空 = admin。
+	WebUser string `json:"web_user,omitempty"`
+	// WebPassword 是控制台密码的 PBKDF2 哈希，空 = 默认密码 admin。
+	WebPassword string `json:"web_password,omitempty"`
+	// WebAuthDisabled 只给测试/纯内网直连用：true 时控制台不再要求登录。
+	WebAuthDisabled bool `json:"web_auth_disabled,omitempty"`
+
 	AutoMount bool `json:"auto_mount"`
 
 	// ---- 以下只用于读取 v1.6.x 及更早的配置，Load 迁移后会被清空 ----
@@ -306,6 +314,14 @@ func (a *AccountConfig) MaskAccount() map[string]any {
 
 // Mask returns a JSON-safe copy of the global settings plus a masked account
 // list, so the web UI can show whether tokens exist without leaking them.
+// WebUserMasked 返回界面上显示的登录名（空配置时是 admin）。
+func (c *Config) WebUserMasked() string {
+	if u := strings.TrimSpace(c.WebUser); u != "" {
+		return u
+	}
+	return "admin"
+}
+
 func (c *Config) Mask() map[string]any {
 	list := make([]map[string]any, 0, len(c.List()))
 	for i := range c.List() {
@@ -334,5 +350,8 @@ func (c *Config) Mask() map[string]any {
 		"web_listen":      c.WebListen,
 		"web_port":        c.WebPort,
 		"auto_mount":      c.AutoMount,
+		"web_user":        c.WebUserMasked(),
+		"web_password_set": c.WebPassword != "",
+		"web_auth_disabled": c.WebAuthDisabled,
 	}
 }
