@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vincent-jia253/fnos-cmccyun/internal/config"
 )
@@ -317,5 +318,143 @@ func TestStrmRejectsCrossAccountOutputDir(t *testing.T) {
 	err := s.SetMountPointOf("", context.Background(), shared, SetMountPointOptions{AllowNonEmpty: true})
 	if err == nil || !strings.Contains(err.Error(), "STRM 输出目录") {
 		t.Fatalf("允许把云盘挂到别人的 STRM 输出目录上：%v", err)
+	}
+}
+
+// 「全部重挂」与「按账号导出」是 v1.7.3 加的两件运维工具：
+// 换完令牌不用一台台点、备份/贴工单时能只导一台且默认不把凭据带出去。
+func TestAccountsOpsTabWiring(t *testing.T) {
+	for _, want := range []string{
+		`id="btnAcctRemountAll"`,
+		`id="acctExportSecrets"`,
+		`data-act="export"`,
+		`action: "remount_all"`,
+		`/api/accounts/export?id=`,
+		`include_auth=1`,
+	} {
+		if !strings.Contains(indexHTML, want) {
+			t.Errorf("界面缺少 %q", want)
+		}
+	}
+}
+
+func TestAccountExportOmitsSecretsByDefault(t *testing.T) {
+	ac := &config.AccountConfig{
+		ID: "acc0123456789ab", Name: "家庭号", Account: "****9621",
+		Authorization: "cGM6MTM5OnRva2Vu", DAVUser: "cmccyun", DAVPassword: "s3cret",
+		MountPoint: "/vol4/1000/移动云盘", StrmEnabled: true,
+	}
+	now := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+
+	safe := AccountExport(ac, false, now)
+	got := safe["account"].(config.AccountConfig)
+	if got.Authorization != "" || got.DAVPassword != "" {
+		t.Fatalf("默认导出不能带凭据，得到 authorization=%q dav_password=%q", got.Authorization, got.DAVPassword)
+	}
+	omitted, _ := safe["secrets_omitted"].([]string)
+	if len(omitted) != 2 {
+		t.Fatalf("应列出两个被省略的凭据字段，得到 %v", omitted)
+	}
+	if _, bad := safe["warning"]; bad {
+		t.Error("不含凭据时不该有 warning")
+	}
+	if got.ID != ac.ID || got.MountPoint != ac.MountPoint || !got.StrmEnabled {
+		t.Error("结构配置必须原样带出（id / 挂载点 / STRM）")
+	}
+
+	full := AccountExport(ac, true, now)
+	all := full["account"].(config.AccountConfig)
+	if all.Authorization != ac.Authorization || all.DAVPassword != ac.DAVPassword {
+		t.Fatal("include_secrets 时应原样带出凭据")
+	}
+	if _, ok := full["warning"].(string); !ok {
+		t.Error("含凭据时必须给 warning")
+	}
+	if _, ok := full["secrets_omitted"]; ok {
+		t.Error("含凭据时不该再列 secrets_omitted")
+	}
+	// 导出是值拷贝：改导出结果不能反向污染运行中的配置
+	all.Authorization = "xxx"
+	if ac.Authorization != "cGM6MTM5OnRva2Vu" {
+		t.Error("AccountExport 改到了原配置")
+	}
+}
+
+func TestAccountsExportEndpoint(t *testing.T) {
+	s, _ := newMountSvc(t, "")
+	s.mu.Lock()
+	if ac, ok := s.cfg.AccountByID(""); ok {
+		ac.Authorization = "cGM6MTM5OnRva2Vu"
+		ac.DAVPassword = "s3cret"
+	}
+	s.mu.Unlock()
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/accounts/export?id=default", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("导出接口状态码 %d，body=%s", rec.Code, rec.Body.String())
+	}
+	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, "cmccyun-default.json") {
+		t.Errorf("文件名应带账号 ID，得到 %q", cd)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("导出不是合法 JSON：%v", err)
+	}
+	acc := out["account"].(map[string]any)
+	if acc["authorization"] != nil || acc["dav_password"] != nil {
+		t.Error("默认导出泄漏了凭据")
+	}
+	if out["app"] != "cmccyun" || out["schema"] == nil {
+		t.Error("导出缺少 app/schema 标记")
+	}
+
+	rec2 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec2, httptest.NewRequest(http.MethodGet,
+		"/api/accounts/export?id=default&include_auth=1", nil))
+	var out2 map[string]any
+	if err := json.Unmarshal(rec2.Body.Bytes(), &out2); err != nil {
+		t.Fatalf("include_auth 导出不是合法 JSON：%v", err)
+	}
+	if out2["account"].(map[string]any)["authorization"] != "cGM6MTM5OnRva2Vu" {
+		t.Error("include_auth=1 时应带出 authorization")
+	}
+
+	rec3 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec3, httptest.NewRequest(http.MethodGet, "/api/accounts/export?id=accdeadbeef00", nil))
+	if rec3.Code == http.StatusOK {
+		t.Error("不存在的账号必须报错")
+	}
+}
+
+// 批量重挂必须逐台汇报：一台没授权不能拖累另一台，界面才能把失败原因说清楚。
+func TestRemountAllReportsEachAccount(t *testing.T) {
+	s, _ := newMountSvc(t, "")
+	s.mu.Lock()
+	s.cfg.Accounts = append(s.cfg.Accounts, config.AccountConfig{
+		ID: "acc0123456789ab", MountPoint: t.TempDir(),
+	})
+	snap := *s.cfg
+	s.mu.Unlock()
+	if err := config.Save(s.cfgPath, &snap); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	rows := s.RemountAll(ctx)
+	if len(rows) != 2 {
+		t.Fatalf("应逐台返回 2 条结果，得到 %d：%v", len(rows), rows)
+	}
+	for _, row := range rows {
+		if _, ok := row["id"]; !ok {
+			t.Errorf("结果缺 id：%v", row)
+		}
+		if ok, _ := row["ok"].(bool); ok {
+			t.Errorf("两个账号都没授权，不该报成功：%v", row)
+		}
+		if msg, _ := row["error"].(string); msg == "" {
+			t.Errorf("失败必须带原因：%v", row)
+		}
 	}
 }

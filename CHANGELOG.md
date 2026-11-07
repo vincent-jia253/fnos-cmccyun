@@ -2,6 +2,20 @@
 
 版本号与应用内 `manifest` 的 `changelog` 字段保持一致；安装包在 [Releases](https://github.com/vincent-jia253/fnos-cmccyun/releases) 里。
 
+## v1.7.3
+
+「账号」页补两件运维工具，多账号才用得顺手：
+
+- **全部重挂**：换完 139 密码 / 令牌后一键逐台重新登录并重新挂载。顺序执行（每次都要走一遍
+  云端登录，并发只会让日志交错），单台失败不影响其它，逐台汇报成功与失败原因；超时 10 分钟。
+- **按账号导出**：每行「导出」下载该账号单独的一份 JSON（挂载点 / 只读 / STRM / WebDAV 用户名），
+  默认**不含** `authorization` 与 `dav_password`（`secrets_omitted` 里写明省略了什么），
+  勾上「导出时包含登录凭据」才带，此时文件内附 `warning`；文件名带账号 ID。
+- WebDAV 分账号凭据补端到端验证：`/dav/` 只认默认账号、`/dav/<id>/` 只认自己那台，
+  串号或无凭据一律 401，`/dav/01影视/` 老地址仍落回默认账号。
+
+测试 116 → 120 项，`tests/multi-account-e2e.sh` 25 → 46 项，`tests/functional.sh` 23/23。
+
 ## v1.7.2
 
 **修掉 v1.7.0 引入的两个真问题（都在真机上跑出来的）。**

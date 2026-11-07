@@ -5,7 +5,7 @@
 换挂载点、切只读、看日志。
 
 - 应用名：`cmccyun`（显示名「移动云盘」）
-- 版本：**1.7.2**，平台 `all`（内置 linux/amd64 与 linux/arm64 两个二进制，CGO_ENABLED=0，无外部依赖）
+- 版本：**1.7.3**，平台 `all`（内置 linux/amd64 与 linux/arm64 两个二进制，CGO_ENABLED=0，无外部依赖）
 - 安装包：`./build.sh` 产出的 `cmccyun.fpk`（发布版见仓库 Releases，md5 记在对应的 Release 说明里）
 - 管理台端口：**19898**（`http://<NAS_IP>:19898/`）
 
@@ -37,6 +37,26 @@
    > **实测（2026-10-12 真实账号）**：手动点「刷新令牌」→ 新到期 2026-11-11 00:40（整整 30.0 天），
    > 新令牌已写回 `config.json`，随后用新凭据列云端目录 / 真读文件都正常 —— 续期确实有效，30 天到期不会断。
 
+### v1.7.3 变更：账号页两件运维工具（全部重挂 / 按账号导出）
+
+多账号跑久了一定会遇到两件事：**换了 139 的密码/令牌要逐台重挂**、**想把某一台的配置单独
+备份或贴给工单**。之前只能一台台点、或者把整份 `config.json`（含所有账号的登录态）发出去。
+
+1. **全部重挂**：账号页新增按钮，按顺序把每台账号重新登录云端、重新挂载，一台失败不影响
+   其余（逐台汇报「成功几台 / 哪台失败、原因」）。顺序而不是并发：每次重挂都要走一遍云端
+   登录，并发只会让日志交错、失败原因难归到具体账号。接口 `POST /api/accounts
+   {"action":"remount_all"}`，超时给到 10 分钟（前端 600 秒），不会点完等 60 秒被掐断。
+2. **按账号导出**：每行「导出」下载该账号单独的一份 JSON（`app`/`schema`/`exported_at` +
+   `account`），**默认不含 `authorization` 与 `dav_password`**，并在 `secrets_omitted` 里
+   写明省略了哪两个字段；勾上「导出时包含登录凭据」才会带，那时文件里会多一条 `warning`。
+   下载文件名带账号 ID（`cmccyun-<id>.json`），一次导好几台也分得清。
+
+顺带把多账号的 WebDAV 凭据补成端到端验证（以前只有单测）：`/dav/` 只认默认账号、
+`/dav/<账号ID>/` 只认它自己那台，**串号或无凭据一律 401**，`/dav/01影视/` 这种老地址仍
+落回默认账号。测试 116 → **120 项**（`TestAccountExportOmitsSecretsByDefault`、
+`TestAccountsExportEndpoint`、`TestRemountAllReportsEachAccount`、`TestAccountsOpsTabWiring`），
+`tests/multi-account-e2e.sh` 25 → **46 项**，`tests/functional.sh` 23/23。
+
 ### v1.7.2 变更：直链地址拼坏 + 开机时 STRM 反复改写
 
 v1.7.0 引入多账号时带进来两个真问题，都是**在真机上跑出来**的：
@@ -56,7 +76,7 @@ v1.7.0 引入多账号时带进来两个真问题，都是**在真机上跑出�
 `未变 31`、`.strm` 的 mtime 一个没动。另有端到端脚本 `tests/strm-e2e.sh` 钉住这两点
 （用假 139 服务驱动真守护进程生成 `.strm`、真去 `curl` 直链；在故意还原成 v1.7.0 写法的
 二进制上它 4 项 FAIL，改回来 13/13）。测试 114 → **116 项**（`TestURLModeWithAccountHasSingleQuestionMark`、
-`TestStrmScanWaitsForMountInAutoMode`），`tests/functional.sh` 23/23。
+`TestStrmScanWaitsForMountInAutoMode`）、**账号页运维工具（按账号导出默认脱敏 / include_auth=1 才带凭据 / 导出接口与文件名 / remount_all 逐台汇报）（v1.7.3）**，`tests/functional.sh` 23/23。
 
 ### v1.7.1 变更：多账号下的 STRM 输出目录不再互相踩
 
@@ -569,8 +589,8 @@ GO=go VERSION=1.3.2 ./build.sh   # 需要 Go 1.24+ 与 fnpack
 | 脚本 | 作用 | 最近一次结果 |
 |---|---|---|
 | `functional.sh` | 对本地假后端跑端到端 FUSE 测试：读一致性（文本 / 3 MB / 25 MB）、10 次管道读、4 路并发读、Python `pread` 偏移扫描、写/改名/删除、12 MB 上传、30 MB 文件**局部改写**（校验暂存占用 <1 MB）、`ftruncate` 缩容 | **23 passed, 0 failed** |
-| `go test ./internal/...` | 单元测试：extents 区间合并、覆盖写入不整文件下载、截断语义、新建文件先 flush 后 write、令牌续期与形状回退、鉴权失败续期重试（含并发只续期一次、续期失败退避、新授权立即生效）、两处锁回归、**死锁看门狗（5 秒超时扫全部控制台入口 `Update(mount_point)` / `CheckMountPath` / `Status`…，超时即失败并打印 goroutine 栈）**、过期预签名地址重签、`vfs.Dead`（`ENOTCONN` 残留挂载识别）、**界面类名回归（`.sp` 只能当按钮里的加载指示器，不许当占位元素用）**、**「授权剩余天数」的悬停说明与可见文字解释必须存在（v1.3.2）**、**STRM 直链参数只拼一次（单问号）/ auto 模式挂载未就绪时跳过扫描且不记到点时间（v1.7.2）**、**挂载位置规则校验 / 非空目录确认 / 卷外与卷根拒绝 / 目录浏览与新建 / 切换位置后旧位置已卸载 / `mounted_at` 重启后可恢复 / 旧位置僵尸挂载自救 / 挂载点内部路径的识别与「先卸下再挪」/ 挂载点内禁止新建目录** | **116 tests, 全绿**（v1.7.2；`-race` 亦通过；FUSE 相关用例需 `CMCCYUN_TEST_FUSE=1`） |
-| `multi-account-e2e.sh` | **多账号端到端**：假后端上让**一个进程同时挂两棵 FUSE 树**（`mnt1` 读写 / `mnt2` 只读），校验两棵都在 `/proc/self/mountinfo`、目录列表与 `dd 64K` 都正常、只读是**分账号**的（只读那棵 `touch` 失败、读写那棵成功）、`/api/status` 一次报两台且 `read_only` 各自正确、`?account=<id>` 只描述那一台、删除第二台**只卸它自己**（`mnt1` 仍在且仍可读、`mounted_at` 清掉该账号、账号数回到 1） | **25 passed, 0 failed** |
+| `go test ./internal/...` | 单元测试：extents 区间合并、覆盖写入不整文件下载、截断语义、新建文件先 flush 后 write、令牌续期与形状回退、鉴权失败续期重试（含并发只续期一次、续期失败退避、新授权立即生效）、两处锁回归、**死锁看门狗（5 秒超时扫全部控制台入口 `Update(mount_point)` / `CheckMountPath` / `Status`…，超时即失败并打印 goroutine 栈）**、过期预签名地址重签、`vfs.Dead`（`ENOTCONN` 残留挂载识别）、**界面类名回归（`.sp` 只能当按钮里的加载指示器，不许当占位元素用）**、**「授权剩余天数」的悬停说明与可见文字解释必须存在（v1.3.2）**、**STRM 直链参数只拼一次（单问号）/ auto 模式挂载未就绪时跳过扫描且不记到点时间（v1.7.2）**、**挂载位置规则校验 / 非空目录确认 / 卷外与卷根拒绝 / 目录浏览与新建 / 切换位置后旧位置已卸载 / `mounted_at` 重启后可恢复 / 旧位置僵尸挂载自救 / 挂载点内部路径的识别与「先卸下再挪」/ 挂载点内禁止新建目录** | **120 tests, 全绿**（v1.7.3；`-race` 亦通过；FUSE 相关用例需 `CMCCYUN_TEST_FUSE=1`） |
+| `multi-account-e2e.sh` | **多账号端到端**：假后端上让**一个进程同时挂两棵 FUSE 树**（`mnt1` 读写 / `mnt2` 只读），校验两棵都在 `/proc/self/mountinfo`、目录列表与 `dd 64K` 都正常、只读是**分账号**的（只读那棵 `touch` 失败、读写那棵成功）、`/api/status` 一次报两台且 `read_only` 各自正确、`?account=<id>` 只描述那一台、**WebDAV 凭据分账号**（`/dav/` 只认默认账号、`/dav/<id>/` 只认自己那台，串号/无凭据一律 401、`/dav/01影视/` 落回默认账号）、**全部重挂**逐台成功且两棵仍挂、**按账号导出**默认脱敏（`include_auth=1` 才带凭据、文件名带账号 ID）、删除第二台**只卸它自己**（`mnt1` 仍在且仍可读、`mounted_at` 清掉该账号、账号数回到 1） | **46 passed, 0 failed** |
 | `restart.sh` | 用假后端（`CMCCYUN_DEBUG_FAKE`）把守护进程挂在 `/tmp/cct/mnt`，管理台 19899 | ok |
 | `fnos-lifecycle.sh` | 在真机上验证 fnOS 生命周期：status 3 → start → status 0 → 挂载可见 → 跨用户读/写 → 幂等 start → stop → 0 残留挂载 | 全部通过 |
 | `fnos-fuse-check.sh` | 检查真实挂载点：`allow_other`、mount↔后端 `md5` 一致、root 与普通用户都能读写 | 通过 |
@@ -599,7 +619,7 @@ bash make-fixtures.sh    # 造 /tmp/cct/backend（文本 + 3 MB + 25 MB 假文�
 bash fake-daemon.sh start   # 隔离实例：cmccyun-test + 端口 19896（不碰线上真挂载）
 bash functional.sh       # 跑 23 项功能测试
 bash strm-e2e.sh /tmp/cmccyun-build/cmccyun   # STRM 端到端（假 139 服务 + 真守护进程）
-bash multi-account-e2e.sh /tmp/cmccyun-build/cmccyun   # 双账号同时挂载 / 只读隔离 / 删除只卸自己
+bash multi-account-e2e.sh /tmp/cmccyun-build/cmccyun   # 双账号同时挂载 / WebDAV 凭据隔离 / 全部重挂 / 按账号导出 / 删除只卸自己
 bash fake-daemon.sh stop
 ```
 

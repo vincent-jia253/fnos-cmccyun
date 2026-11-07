@@ -734,14 +734,19 @@ const indexHTML = `<!DOCTYPE html>
           </div>
           <div class="actions">
             <button id="btnAcctAdd" class="primary">新增账号</button>
+            <button id="btnAcctRemountAll" class="ghost">全部重挂</button>
             <button id="btnAcctRefresh" class="ghost">刷新列表</button>
           </div>
+          <div class="checkline"><input id="acctExportSecrets" type="checkbox" />
+            <span class="hint">导出配置时包含登录凭据（authorization / dav_password）—— 会明文落盘，别随手外发</span></div>
           <div class="msg" id="acctMsg"></div>
           <div class="hint" style="margin-top:10px">
             新账号加完要单独授权：切到该账号 → 在「授权」页扫码或粘贴一条它自己的 Authorization → 回「挂载设置」点挂载。<br>
             挂载点之间不能互相包含（<code class="k">/vol4/1000/移动云盘</code> 和 <code class="k">/vol4/1000/移动云盘/电影</code> 只能留一个），
             否则同一棵目录树会被两个账号同时接管。<br>
-            WebDAV 路径：默认账号沿用老地址 <code class="k">/dav/</code>，其余账号是 <code class="k">/dav/&lt;账号 ID&gt;/</code>，凭据各自独立。
+            WebDAV 路径：默认账号沿用老地址 <code class="k">/dav/</code>，其余账号是 <code class="k">/dav/&lt;账号 ID&gt;/</code>，凭据各自独立。<br>
+            「导出」下载的是该账号单独的一份 JSON（迁移/备份/贴工单用）：默认不含 <code class="k">authorization</code> 与
+            <code class="k">dav_password</code>，勾上上面的框才会带；「全部重挂」会逐台重新登录再重新挂载，换完密码或令牌用它。
           </div>
         </div>
       </div>
@@ -982,6 +987,7 @@ function acctBtns(a, isCur) {
   if (!isCur) b.push('<button class="sm" data-act="switch" data-id="' + esc(a.id) + '">切换</button>');
   if (!a.default) b.push('<button class="sm ghost" data-act="default" data-id="' + esc(a.id) + '">设为默认</button>');
   b.push('<button class="sm ghost" data-act="rename" data-id="' + esc(a.id) + '">改名</button>');
+  b.push('<button class="sm ghost" data-act="export" data-id="' + esc(a.id) + '" title="导出这个账号的配置（默认不含登录凭据）">导出</button>');
   if (accounts.length > 1) b.push('<button class="sm danger" data-act="delete" data-id="' + esc(a.id) + '">删除</button>');
   return b.join(" ");
 }
@@ -1053,7 +1059,8 @@ async function acctPost(body, btn, msg, okText) {
   if (msg) say("acctMsg", "", true);
   busy(btn, true, "处理中…");
   try {
-    var d = await api("/api/accounts", { method: "POST", body: JSON.stringify(body), timeout: 60000 });
+    var tmo = body.action === "remount_all" ? 600000 : 60000;
+    var d = await api("/api/accounts", { method: "POST", body: JSON.stringify(body), timeout: tmo });
     if (body.action === "add" && d.id) {
       curAccount = d.id;
       accounts = d.accounts || accounts;
@@ -1093,6 +1100,19 @@ async function acctPost(body, btn, msg, okText) {
   };
   var rf = $("btnAcctRefresh");
   if (rf) rf.onclick = async function () { await refresh(); renderAcctTable(); toast("账号列表已刷新", "ok"); };
+  /* 全部重挂：换完密码/令牌以后不用一台台点，逐台重登再重挂，失败的单独报 */
+  var rma = $("btnAcctRemountAll");
+  if (rma) rma.onclick = async function () {
+    if (!confirm("依次重挂全部账号？\n\n每个账号都会重新登录云端再重新挂载，期间它的目录读写会短暂失败（通常几秒到十几秒）。\n失败的那台会单独报错，不影响其它账号。")) return;
+    var d = await acctPost({ action: "remount_all" }, this, "acctMsg");
+    if (!d) return;
+    var rs = d.results || [], okN = 0, bad = [];
+    for (var i = 0; i < rs.length; i++) {
+      if (rs[i].ok) okN++;
+      else bad.push((rs[i].name || rs[i].id) + "：" + (rs[i].error || "失败"));
+    }
+    say("acctMsg", "已重挂 " + okN + "/" + rs.length + " 台" + (bad.length ? "；失败：" + bad.join("；") : ""), bad.length === 0);
+  };
   var body = $("acctBody");
   if (body) body.onclick = async function (ev) {
     var t = ev.target;
@@ -1100,6 +1120,12 @@ async function acctPost(body, btn, msg, okText) {
     if (!t || t === body) return;
     var act = t.dataset.act, id = t.dataset.id;
     if (act === "switch") { await selectAccount(id); return; }
+    if (act === "export") {
+      var inc = ($("acctExportSecrets") && $("acctExportSecrets").checked) ? "&include_auth=1" : "";
+      window.location = "/api/accounts/export?id=" + encodeURIComponent(id) + inc;
+      say("acctMsg", "已开始下载该账号的配置" + (inc ? "（含登录凭据，注意保管）" : "（不含登录凭据）"), true);
+      return;
+    }
     if (act === "default") { await acctPost({ action: "default", id: id }, t, "acctMsg", "已设为默认账号（老地址 /dav/ 也跟着变）"); return; }
     if (act === "rename") {
       var a = null;

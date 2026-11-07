@@ -1,11 +1,13 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/vincent-jia253/fnos-cmccyun/internal/config"
 )
@@ -163,8 +165,90 @@ func (s *Service) SetDefaultAccount(id string) error {
 	return config.Save(s.cfgPath, &snapshot)
 }
 
+// RemountAll 依次重挂所有账号：换完 139 的密码/令牌以后，不用一台台点「重新挂载」。
+//
+// 顺序执行而不是并发：每次重挂都要重新走一遍云端登录（有的账号还要等短信/扫码
+// 之外的令牌续期），并发只会让日志交错、失败原因难以归到具体账号。单台失败不
+// 影响其余的，结果逐台回给界面。
+func (s *Service) RemountAll(ctx context.Context) []map[string]any {
+	cfg := s.Config()
+	out := make([]map[string]any, 0, len(cfg.Accounts))
+	for i := range cfg.Accounts {
+		id := cfg.Accounts[i].ID
+		name := cfg.Accounts[i].DisplayName()
+		row := map[string]any{"id": id, "name": name}
+		if err := s.RemountOf(ctx, id); err != nil {
+			row["ok"] = false
+			row["error"] = err.Error()
+			s.logf("批量重挂：账号「%s」失败：%v", name, err)
+		} else {
+			row["ok"] = true
+			s.logf("批量重挂：账号「%s」已重挂", name)
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// AccountExport 是「按账号导出配置」的载荷。
+//
+// 默认带走的是结构配置（挂载点 / 只读 / STRM / WebDAV 用户名），凭据一律
+// 置空并列出被省略的字段：这个 JSON 通常会被贴进工单、放进笔记，登录态
+// （authorization）和 WebDAV 密码不该跟着跑。确实要连凭据一起备份时，
+// 显式 include_auth=1（界面上是那个勾选框）。
+func AccountExport(ac *config.AccountConfig, includeSecrets bool, now time.Time) map[string]any {
+	acc := *ac
+	omitted := []string{}
+	if !includeSecrets {
+		if acc.Authorization != "" {
+			omitted = append(omitted, "authorization")
+		}
+		if acc.DAVPassword != "" {
+			omitted = append(omitted, "dav_password")
+		}
+		acc.Authorization = ""
+		acc.DAVPassword = ""
+	}
+	out := map[string]any{
+		"app":         "cmccyun",
+		"schema":      1,
+		"exported_at": now.UTC().Format(time.RFC3339),
+		"account":     acc,
+	}
+	if len(omitted) > 0 {
+		out["secrets_omitted"] = omitted
+	} else {
+		out["warning"] = "含登录凭据（authorization / dav_password），请妥善保管，用完即删"
+	}
+	return out
+}
+
 // registerAccountRoutes 挂账号管理接口。
 func (s *Service) registerAccountRoutes(mux *http.ServeMux) {
+	// 按账号导出配置：默认不含凭据（见 AccountExport）。下载文件名带账号 ID，
+	// 免得一次导好几台时分不清谁是谁。
+	mux.HandleFunc("/api/accounts/export", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimSpace(r.URL.Query().Get("id"))
+		cfg := s.Config()
+		ac, ok := cfg.AccountByID(id)
+		if !ok {
+			writeErr(w, "账号不存在："+id)
+			return
+		}
+		include := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("include_auth")))
+		payload := AccountExport(ac, include == "1" || include == "true", time.Now())
+		body, err := json.MarshalIndent(payload, "", "  ")
+		if err != nil {
+			writeErr(w, err.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Header().Set("Content-Disposition",
+			`attachment; filename="cmccyun-`+ac.ID+`.json"`)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(append(body, '\n'))
+	})
+
 	mux.HandleFunc("/api/accounts", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, map[string]any{"ok": true, "accounts": s.AccountsView(),
@@ -204,6 +288,15 @@ func (s *Service) registerAccountRoutes(mux *http.ServeMux) {
 			err = s.DeleteAccount(body.ID)
 		case "default":
 			err = s.SetDefaultAccount(body.ID)
+		case "remount_all":
+			// 所有账号挨个重挂：慢（每个都要重新登录一次云端），所以单独给
+			// 一个宽松的超时，避免界面上点完等到 120 秒被掐断。
+			ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+			defer cancel()
+			results := s.RemountAll(ctx)
+			writeJSON(w, map[string]any{"ok": true, "results": results,
+				"accounts": s.AccountsView(), "default": s.Config().DefaultAccount})
+			return
 		default:
 			err = fmt.Errorf("未知操作 %q", body.Action)
 		}

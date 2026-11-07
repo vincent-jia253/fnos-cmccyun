@@ -11,9 +11,11 @@
 #      ?account=<id> 只描述那一台
 #   5) 删除第二台：只卸它自己，第一台仍然挂着；mounted_at 里的记录一并清掉
 #
-# 说明：WebDAV 的分账号凭据在这里测不了 —— dav.FS 是从 api.Client 建的，而本脚本
-# 走的是 CMCCYUN_DEBUG_FAKE（没有云端 client）。那部分由单测 TestDAVDispatchPerAccount
-# 与真机手动验证覆盖。
+#   6) WebDAV 凭据是分账号的：/dav/ 只认默认账号，/dav/<id>/ 只认它自己的；
+#      无凭据或串号一律 401（fake 模式没有云端 client，dav.FS 是空的，所以这里只断言
+#      「鉴权过没过」，不断言 PROPFIND 的返回体）
+#   7) 「全部重挂」逐台重登重挂、逐台汇报结果
+#   8) 「按账号导出」只导一台；默认不带 authorization/dav_password，include_auth=1 才带
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BIN="${1:-${BIN:-/tmp/cmccyun-build/cmccyun}}"
@@ -53,11 +55,13 @@ MYUID=$(id -u); MYGID=$(id -g)
 cat >"$ROOT/etc/config.json" <<JSON
 {
   "accounts": [
-    {"id": "default", "mount_point": "${ROOT}/mnt1", "read_only": false},
-    {"id": "${ACC2}", "mount_point": "${ROOT}/mnt2", "read_only": true}
+    {"id": "default", "mount_point": "${ROOT}/mnt1", "read_only": false,
+     "authorization": "cGM6MTM4MDAwMDAwMDA6dG9rZW4=", "dav_user": "u-one", "dav_password": "p-one"},
+    {"id": "${ACC2}", "mount_point": "${ROOT}/mnt2", "read_only": true,
+     "authorization": "cGM6MTM4MDAwMDAwMDA6dG9rZW4=", "dav_user": "u-two", "dav_password": "p-two"}
   ],
   "default_account": "default",
-  "dav_enabled": false,
+  "dav_enabled": true,
   "uid": ${MYUID},
   "gid": ${MYGID},
   "file_perm": "0644",
@@ -132,6 +136,74 @@ pass=$((pass + pc)); fail=$((fail + fc))
 echo "== 4b. ?account= 只描述那一台 =="
 m2=$(curl -s "$API/api/status?account=$ACC2" | python3 -c "import json,sys;print(json.load(sys.stdin)['config'].get('mount_point'))")
 chk "第二账号的 mount_point" "$m2" "$ROOT/mnt2"
+
+echo "== 4c. WebDAV 凭据是分账号的 =="
+dav() { curl -s -o /dev/null -w '%{http_code}' -X PROPFIND "$@"; }
+chk "/dav/ 无凭据 → 401" "$(dav "$API/dav/")" "401"
+c=$(dav -u u-one:p-one "$API/dav/")
+if [ "$c" != "401" ]; then ok "/dav/ 收默认账号凭据（$c，非 401）"; else no "/dav/ 拒了默认账号凭据"; fi
+chk "/dav/ 收第二账号凭据 → 401（不能串号）" "$(dav -u u-two:p-two "$API/dav/")" "401"
+c=$(dav -u u-two:p-two "$API/dav/$ACC2/")
+if [ "$c" != "401" ]; then ok "/dav/<第二账号>/ 收自己的凭据（$c，非 401）"; else no "/dav/<第二账号>/ 拒了自己的凭据"; fi
+chk "/dav/<第二账号>/ 收默认账号凭据 → 401" "$(dav -u u-one:p-one "$API/dav/$ACC2/")" "401"
+chk "/dav/<第二账号>/ 无凭据 → 401" "$(dav "$API/dav/$ACC2/")" "401"
+c=$(dav -u u-one:p-one "$API/dav/01影视/")
+if [ "$c" != "401" ]; then ok "/dav/01影视/ 落回默认账号（$c，非 401）"; else no "/dav/01影视/ 被当成账号 ID 拒了"; fi
+
+echo "== 4d. 全部重挂 =="
+curl -s -X POST "$API/api/accounts" -H 'Content-Type: application/json' \
+     -d '{"action":"remount_all"}' >"$ROOT/remount_all.json"
+python3 - "$ROOT/remount_all.json" "$ACC2" >"$ROOT/rma_checks.txt" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+acc2 = sys.argv[2]
+def chk(n, c): print(("PASS  " if c else "FAIL  ") + n)
+rs = d.get("results") or []
+chk("remount_all 返回 ok", d.get("ok") is True)
+chk("逐台汇报（2 条）", len(rs) == 2)
+chk("两台都重挂成功", bool(rs) and all(r.get("ok") for r in rs)
+    and {r.get("id") for r in rs} == {"default", acc2})
+PYEOF
+sed 's/^/  /' "$ROOT/rma_checks.txt"
+pc=$(grep -c '^PASS' "$ROOT/rma_checks.txt" || true); pc=${pc:-0}
+fc=$(grep -c '^FAIL' "$ROOT/rma_checks.txt" || true); fc=${fc:-0}
+pass=$((pass + pc)); fail=$((fail + fc))
+chk "重挂后 mnt1 还在" "$(inmount "$ROOT/mnt1")" "yes"
+chk "重挂后 mnt2 还在" "$(inmount "$ROOT/mnt2")" "yes"
+
+echo "== 4e. 按账号导出配置 =="
+curl -s -D "$ROOT/exp.hdr" -o "$ROOT/exp.json" "$API/api/accounts/export?id=$ACC2"
+python3 - "$ROOT/exp.json" "$ROOT/exp.hdr" "$ACC2" >"$ROOT/exp_checks.txt" <<'PYEOF'
+import json, sys
+body = json.load(open(sys.argv[1]))
+hdr = open(sys.argv[2], encoding="utf-8", errors="replace").read()
+acc2 = sys.argv[3]
+def chk(n, c): print(("PASS  " if c else "FAIL  ") + n)
+a = body.get("account") or {}
+chk("导出带 app/schema 标记", body.get("app") == "cmccyun" and body.get("schema") == 1)
+chk("导出的就是指定账号", a.get("id") == acc2)
+chk("默认不含 authorization", not a.get("authorization"))
+chk("默认不含 dav_password", not a.get("dav_password"))
+chk("注明省略了哪些凭据", set(body.get("secrets_omitted") or []) == {"authorization", "dav_password"})
+chk("下载文件名带账号 ID", "cmccyun-" + acc2 + ".json" in hdr)
+PYEOF
+sed 's/^/  /' "$ROOT/exp_checks.txt"
+pc=$(grep -c '^PASS' "$ROOT/exp_checks.txt" || true); pc=${pc:-0}
+fc=$(grep -c '^FAIL' "$ROOT/exp_checks.txt" || true); fc=${fc:-0}
+pass=$((pass + pc)); fail=$((fail + fc))
+curl -s "$API/api/accounts/export?id=$ACC2&include_auth=1" >"$ROOT/exp2.json"
+python3 - "$ROOT/exp2.json" >"$ROOT/exp2_checks.txt" <<'PYEOF'
+import json, sys
+b = json.load(open(sys.argv[1])); a = b.get("account") or {}
+def chk(n, c): print(("PASS  " if c else "FAIL  ") + n)
+chk("include_auth=1 带出 authorization", bool(a.get("authorization")))
+chk("include_auth=1 带出 dav_password", bool(a.get("dav_password")))
+chk("含凭据时带 warning", isinstance(b.get("warning"), str) and bool(b.get("warning")))
+PYEOF
+sed 's/^/  /' "$ROOT/exp2_checks.txt"
+pc=$(grep -c '^PASS' "$ROOT/exp2_checks.txt" || true); pc=${pc:-0}
+fc=$(grep -c '^FAIL' "$ROOT/exp2_checks.txt" || true); fc=${fc:-0}
+pass=$((pass + pc)); fail=$((fail + fc))
 
 echo "== 5. 删除第二台：只卸它自己 =="
 curl -s -X POST "$API/api/accounts" -H 'Content-Type: application/json' \
