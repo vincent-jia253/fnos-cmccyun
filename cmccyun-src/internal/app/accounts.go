@@ -223,6 +223,77 @@ func AccountExport(ac *config.AccountConfig, includeSecrets bool, now time.Time)
 	return out
 }
 
+// filterLogsForAccount 只留下跟某个账号有关的日志行。
+//
+// 守护进程只写一个日志文件，行里没有账号字段；能用来定位一台账号的线索是
+// 账号 ID（acc…，出现在 /dav/<id>/ 与 STRM 快照里）、账号尾号（****9621）、
+// 备注名和挂载点。命中任意一个就算这台账号的行——挂载/卸载/STRM/续期都会把
+// 挂载点或尾号写进日志，所以过滤后通常就够看了。
+func filterLogsForAccount(lines []string, ac *config.AccountConfig) []string {
+	if ac == nil {
+		return lines
+	}
+	needles := make([]string, 0, 5+len(ac.StrmPairs))
+	candidates := []string{ac.ID, ac.Account, ac.Name, ac.MountPoint, "/dav/" + ac.ID}
+	// STRM 的日志行写的是本地输出目录，不是挂载点，不带上的话「这台账号的
+	// STRM 扫描」永远查不到。
+	for _, pair := range ac.StrmPairs {
+		candidates = append(candidates, pair.Local)
+	}
+	for _, v := range candidates {
+		if v = strings.TrimSpace(v); v != "" {
+			needles = append(needles, v)
+		}
+	}
+	if len(needles) == 0 {
+		return lines
+	}
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		for _, needle := range needles {
+			if containsToken(line, needle) {
+				out = append(out, line)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// containsToken 找 needle，但要求两侧不是「标识符字符」。
+//
+// 光用 strings.Contains 会把别的账号的日志捞进来：挂载点
+// /vol4/1000/移动云盘 是 /vol4/1000/移动云盘-2 的前缀，前缀命中就等于把第二台
+// 账号的挂载/STRM 行混进了第一台的视图。所以要求匹配后面（或前面）紧跟的是
+// 空格、括号、斜杠、标点这类分隔符，而不是字母数字、- 或 _。
+func containsToken(line, needle string) bool {
+	for offset := 0; offset <= len(line); {
+		i := strings.Index(line[offset:], needle)
+		if i < 0 {
+			return false
+		}
+		start := offset + i
+		end := start + len(needle)
+		leftOK := start == 0 || !isWordByte(line[start-1])
+		rightOK := end == len(line) || !isWordByte(line[end])
+		if leftOK && rightOK {
+			return true
+		}
+		offset = start + len(needle)
+	}
+	return false
+}
+
+func isWordByte(b byte) bool {
+	switch {
+	case b >= '0' && b <= '9', b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z':
+		return true
+	case b == '-' || b == '_':
+		return true
+	}
+	return false
+}
+
 // registerAccountRoutes 挂账号管理接口。
 func (s *Service) registerAccountRoutes(mux *http.ServeMux) {
 	// 按账号导出配置：默认不含凭据（见 AccountExport）。下载文件名带账号 ID，

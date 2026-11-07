@@ -737,16 +737,20 @@ const indexHTML = `<!DOCTYPE html>
             <button id="btnAcctRemountAll" class="ghost">全部重挂</button>
             <button id="btnAcctRefresh" class="ghost">刷新列表</button>
           </div>
-          <div class="checkline"><input id="acctExportSecrets" type="checkbox" />
-            <span class="hint">导出配置时包含登录凭据（authorization / dav_password）—— 会明文落盘，别随手外发</span></div>
+          <div class="hint" style="margin-top:10px">
+            每行四个按钮：<code class="k">导出</code> 下载该账号配置（<b>不含</b>登录凭据）、
+            <code class="k">含凭据</code> 连 <code class="k">authorization</code> 与 <code class="k">dav_password</code> 一起导（明文，别外发）、
+            <code class="k">日志</code> 只看这台账号的日志、<code class="k">扫描</code> 立刻跑一轮 STRM（仅开了 STRM 的账号）。
+          </div>
           <div class="msg" id="acctMsg"></div>
           <div class="hint" style="margin-top:10px">
             新账号加完要单独授权：切到该账号 → 在「授权」页扫码或粘贴一条它自己的 Authorization → 回「挂载设置」点挂载。<br>
             挂载点之间不能互相包含（<code class="k">/vol4/1000/移动云盘</code> 和 <code class="k">/vol4/1000/移动云盘/电影</code> 只能留一个），
             否则同一棵目录树会被两个账号同时接管。<br>
             WebDAV 路径：默认账号沿用老地址 <code class="k">/dav/</code>，其余账号是 <code class="k">/dav/&lt;账号 ID&gt;/</code>，凭据各自独立。<br>
-            「导出」下载的是该账号单独的一份 JSON（迁移/备份/贴工单用）：默认不含 <code class="k">authorization</code> 与
-            <code class="k">dav_password</code>，勾上上面的框才会带；「全部重挂」会逐台重新登录再重新挂载，换完密码或令牌用它。
+            「导出」下载的是该账号单独的一份 JSON（迁移/备份/贴工单用），不含 <code class="k">authorization</code> 与
+            <code class="k">dav_password</code>；要连凭据一起备份就点同一行的「含凭据」。
+            「全部重挂」会逐台重新登录再重新挂载，换完密码或令牌用它。
           </div>
         </div>
       </div>
@@ -755,12 +759,14 @@ const indexHTML = `<!DOCTYPE html>
     <!-- ===== 日志 ===== -->
     <section class="panel" id="tab-logs">
       <div class="card">
-        <div class="hd"><h2>运行日志</h2><span class="sub">最近 200 条</span></div>
+        <div class="hd"><h2>运行日志</h2><span class="sub" id="logSub">最近 200 条</span></div>
         <div class="bd">
           <pre id="logs">加载中…</pre>
           <div class="actions">
             <button id="btnLogs" class="sm">刷新日志</button>
             <div class="checkline"><input id="f_follow" type="checkbox" checked /> <span class="hint">自动刷新并滚到最新</span></div>
+            <div class="checkline" id="logAcctWrap" style="display:none"><input id="f_logAcct" type="checkbox" checked />
+              <span class="hint">只看当前账号（账号页每行的「日志」按钮会把这里切成那一台）</span></div>
           </div>
         </div>
       </div>
@@ -830,6 +836,7 @@ var mounted = false;
 var lastSt = null;      // 最近一次成功读取的状态
 var browseLoaded = false;
 var curAccount = "";    // 当前操作的账号 ID；"" 表示默认账号
+var logAccount = "";    // 日志页要过滤的账号 ID；账号页每行「日志」按钮会设它
 var accounts = [];      // /api/status 里的 accounts（不含密文）
 var curTab = "mount";
 
@@ -987,7 +994,10 @@ function acctBtns(a, isCur) {
   if (!isCur) b.push('<button class="sm" data-act="switch" data-id="' + esc(a.id) + '">切换</button>');
   if (!a.default) b.push('<button class="sm ghost" data-act="default" data-id="' + esc(a.id) + '">设为默认</button>');
   b.push('<button class="sm ghost" data-act="rename" data-id="' + esc(a.id) + '">改名</button>');
-  b.push('<button class="sm ghost" data-act="export" data-id="' + esc(a.id) + '" title="导出这个账号的配置（默认不含登录凭据）">导出</button>');
+  b.push('<button class="sm ghost" data-act="export" data-id="' + esc(a.id) + '" title="下载这个账号的配置（不含登录凭据）">导出</button>');
+  b.push('<button class="sm ghost" data-act="export_auth" data-id="' + esc(a.id) + '" title="下载这个账号的配置，含 authorization 与 dav_password（明文！）">含凭据</button>');
+  b.push('<button class="sm ghost" data-act="logs" data-id="' + esc(a.id) + '" title="只看这个账号的日志">日志</button>');
+  if (a.strm_enabled) b.push('<button class="sm ghost" data-act="scan" data-id="' + esc(a.id) + '" title="立刻对这台账号跑一轮 STRM 扫描">扫描</button>');
   if (accounts.length > 1) b.push('<button class="sm danger" data-act="delete" data-id="' + esc(a.id) + '">删除</button>');
   return b.join(" ");
 }
@@ -1121,9 +1131,32 @@ async function acctPost(body, btn, msg, okText) {
     var act = t.dataset.act, id = t.dataset.id;
     if (act === "switch") { await selectAccount(id); return; }
     if (act === "export") {
-      var inc = ($("acctExportSecrets") && $("acctExportSecrets").checked) ? "&include_auth=1" : "";
-      window.location = "/api/accounts/export?id=" + encodeURIComponent(id) + inc;
-      say("acctMsg", "已开始下载该账号的配置" + (inc ? "（含登录凭据，注意保管）" : "（不含登录凭据）"), true);
+      window.location = "/api/accounts/export?id=" + encodeURIComponent(id);
+      say("acctMsg", "已开始下载该账号的配置（不含登录凭据）", true);
+      return;
+    }
+    if (act === "export_auth") {
+      if (!confirm("导出「含凭据」的配置？\n\n文件里会带 authorization（云盘登录态）和 dav_password（WebDAV 密码）的明文。\n拿到这份文件就等于拿到这台云盘——别放进聊天、工单或公开仓库。")) return;
+      window.location = "/api/accounts/export?id=" + encodeURIComponent(id) + "&include_auth=1";
+      say("acctMsg", "已开始下载该账号的配置（含登录凭据，用完请删掉）", true);
+      return;
+    }
+    if (act === "logs") {
+      logAccount = id;
+      showTab("logs");
+      loadLogs();
+      return;
+    }
+    if (act === "scan") {
+      busy(t, true, "扫描中…");
+      try {
+        var d = await api("/api/strm/scan?account=" + encodeURIComponent(id), { method: "POST", timeout: 900000 });
+        var n = 0, upd = 0, sk = 0;
+        var rs = d.results || [];
+        for (var k = 0; k < rs.length; k++) { n += rs[k].total || 0; upd += rs[k].updated || 0; sk += rs[k].skipped || 0; }
+        if (d.ok) toast("STRM 扫描完成：共 " + n + " 个（更新 " + upd + "，未变 " + sk + "）", "ok");
+        else toast("STRM 扫描失败：" + (d.error || "未知错误"), "err");
+      } finally { busy(t, false); }
       return;
     }
     if (act === "default") { await acctPost({ action: "default", id: id }, t, "acctMsg", "已设为默认账号（老地址 /dav/ 也跟着变）"); return; }
@@ -1496,10 +1529,24 @@ async function saveConfig(extra) {
 
 async function loadLogs() {
   if (!document.getElementById("tab-logs").classList.contains("act")) return;
+  var q = "/api/logs?n=200";
+  var wrap = $("logAcctWrap"), only = $("f_logAcct");
+  if (wrap) wrap.style.display = accounts.length > 1 ? "" : "none";
+  var who = "";
+  if (only && only.checked) {
+    var id = logAccount || curAccount;
+    if (id) { q += "&account=" + encodeURIComponent(id); who = id; }
+  }
   try {
-    var d = await api("/api/logs?n=200", { timeout: 12000 });
+    var d = await api(q, { timeout: 12000 });
     var pre = $("logs");
-    pre.textContent = (d.lines || []).join("\n") || "（暂无日志）";
+    pre.textContent = (d.lines || []).join("\n") || (d.filtered ? "（这个账号还没有日志）" : "（暂无日志）");
+    var sub = $("logSub");
+    if (sub) {
+      var name = "";
+      for (var i = 0; i < accounts.length; i++) if (accounts[i].id === who) name = accounts[i].name || accounts[i].id;
+      sub.textContent = who ? ("只看账号 " + (name || who) + " · 最近 200 条") : "全部账号 · 最近 200 条";
+    }
     if ($("f_follow").checked) pre.scrollTop = pre.scrollHeight;
   } catch (e) { $("logs").textContent = e.message; }
 }

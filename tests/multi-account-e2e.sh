@@ -45,7 +45,7 @@ for m in "$ROOT/mnt1" "$ROOT/mnt2"; do
     fusermount -u "$m" 2>/dev/null
 done
 rm -rf "$ROOT"
-mkdir -p "$ROOT/etc" "$ROOT/var/staging" "$ROOT/mnt1" "$ROOT/mnt2" \
+mkdir -p "$ROOT/etc" "$ROOT/var/staging" "$ROOT/mnt1" "$ROOT/mnt2" "$ROOT/strm2" \
          "$ROOT/backend/电影" "$ROOT/backend/文档"
 head -c 1048576 /dev/urandom >"$ROOT/backend/电影/测试片.mkv"
 printf 'hello multi-account\n' >"$ROOT/backend/文档/readme.txt"
@@ -58,7 +58,9 @@ cat >"$ROOT/etc/config.json" <<JSON
     {"id": "default", "mount_point": "${ROOT}/mnt1", "read_only": false,
      "authorization": "cGM6MTM4MDAwMDAwMDA6dG9rZW4=", "dav_user": "u-one", "dav_password": "p-one"},
     {"id": "${ACC2}", "mount_point": "${ROOT}/mnt2", "read_only": true,
-     "authorization": "cGM6MTM4MDAwMDAwMDA6dG9rZW4=", "dav_user": "u-two", "dav_password": "p-two"}
+     "authorization": "cGM6MTM4MDAwMDAwMDA6dG9rZW4=", "dav_user": "u-two", "dav_password": "p-two",
+     "strm_enabled": true, "strm_mode": "path", "strm_interval_min": 5,
+     "strm_pairs": [{"cloud": "/", "local": "${ROOT}/strm2"}]}
   ],
   "default_account": "default",
   "dav_enabled": true,
@@ -203,6 +205,45 @@ PYEOF
 sed 's/^/  /' "$ROOT/exp2_checks.txt"
 pc=$(grep -c '^PASS' "$ROOT/exp2_checks.txt" || true); pc=${pc:-0}
 fc=$(grep -c '^FAIL' "$ROOT/exp2_checks.txt" || true); fc=${fc:-0}
+pass=$((pass + pc)); fail=$((fail + fc))
+
+echo "== 4f. 单账号日志 + 单账号 STRM 扫描 =="
+curl -s "$API/api/logs?n=300&account=$ACC2" >"$ROOT/logs2.json"
+python3 - "$ROOT/logs2.json" "$ROOT" "$ACC2" >"$ROOT/logs_checks.txt" <<'LOGCHK'
+import json, sys
+d = json.load(open(sys.argv[1]))
+root, acc2 = sys.argv[2], sys.argv[3]
+def chk(n, c): print(("PASS  " if c else "FAIL  ") + n)
+lines = d.get("lines") or []
+chk("日志接口标了 filtered", d.get("filtered") is True)
+chk("按账号取到日志行", len(lines) > 0)
+chk("不含另一台账号的挂载点", not any(root + "/mnt1" in ln for ln in lines))
+chk("行里都提到这台账号的线索",
+    all((acc2 in ln) or (root + "/mnt2" in ln) or ("u-two" in ln) or (root + "/strm2" in ln)
+        for ln in lines))
+LOGCHK
+sed 's/^/  /' "$ROOT/logs_checks.txt"
+pc=$(grep -c '^PASS' "$ROOT/logs_checks.txt" || true); pc=${pc:-0}
+fc=$(grep -c '^FAIL' "$ROOT/logs_checks.txt" || true); fc=${fc:-0}
+pass=$((pass + pc)); fail=$((fail + fc))
+
+curl -s -X POST "$API/api/strm/scan?account=$ACC2" -o "$ROOT/scan2.json"
+# 注意：这个脚本走 CMCCYUN_DEBUG_FAKE，没有云端 client，所以扫描只能验「打到哪台」，
+# 不能验「生成 .strm」（那部分由 strm-e2e.sh 用假 139 服务覆盖）。
+python3 - "$ROOT/scan2.json" "$ROOT" "$ACC2" >"$ROOT/scan_checks.txt" <<'SCANCHK'
+import json, os, sys
+d = json.load(open(sys.argv[1]))
+root, acc2 = sys.argv[2], sys.argv[3]
+def chk(n, c): print(("PASS  " if c else "FAIL  ") + n)
+st = d.get("strm") or {}
+chk("scan?account 只作用在第二台（strm.account）", st.get("account") == acc2)
+chk("扫描触发了这台账号的定时器状态（last_at 落上）", bool(st.get("last_at")))
+chk("没有云端 client 时如实报错（不假装成功）", d.get("ok") is False and "云盘" in (d.get("error") or ""))
+chk("默认账号没被牵连（没有 strm1 输出）", not os.path.exists(os.path.join(root, "strm1")))
+SCANCHK
+sed 's/^/  /' "$ROOT/scan_checks.txt"
+pc=$(grep -c '^PASS' "$ROOT/scan_checks.txt" || true); pc=${pc:-0}
+fc=$(grep -c '^FAIL' "$ROOT/scan_checks.txt" || true); fc=${fc:-0}
 pass=$((pass + pc)); fail=$((fail + fc))
 
 echo "== 5. 删除第二台：只卸它自己 =="

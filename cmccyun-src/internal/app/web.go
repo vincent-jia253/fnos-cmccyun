@@ -224,8 +224,23 @@ func (s *Service) Handler() http.Handler {
 		if n <= 0 {
 			n = 200
 		}
+		// ?account=<id> 只看这一台的日志（行里没有账号字段，按 ID/尾号/备注名/
+		// 挂载点这类线索过滤）。多账号时先多捞一些，过滤完再从尾部截 n 行。
+		id := accID(r)
 		logs := s.Ring().Tail(n)
-		writeJSON(w, map[string]any{"ok": true, "lines": logs})
+		filtered := false
+		if id != "" {
+			cfg := s.Config()
+			if ac, ok := cfg.AccountByID(id); ok {
+				logs = filterLogsForAccount(s.Ring().Tail(n*20), ac)
+				if len(logs) > n {
+					logs = logs[len(logs)-n:]
+				}
+				filtered = true
+			}
+		}
+		writeJSON(w, map[string]any{"ok": true, "lines": logs,
+			"filtered": filtered, "account": id})
 	})
 
 	mux.HandleFunc("/api/shares", func(w http.ResponseWriter, r *http.Request) {

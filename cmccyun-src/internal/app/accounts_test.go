@@ -326,11 +326,15 @@ func TestStrmRejectsCrossAccountOutputDir(t *testing.T) {
 func TestAccountsOpsTabWiring(t *testing.T) {
 	for _, want := range []string{
 		`id="btnAcctRemountAll"`,
-		`id="acctExportSecrets"`,
 		`data-act="export"`,
+		`data-act="export_auth"`,
+		`data-act="logs"`,
+		`data-act="scan"`,
 		`action: "remount_all"`,
 		`/api/accounts/export?id=`,
 		`include_auth=1`,
+		`id="f_logAcct"`,
+		`/api/logs?n=200`,
 	} {
 		if !strings.Contains(indexHTML, want) {
 			t.Errorf("界面缺少 %q", want)
@@ -456,5 +460,49 @@ func TestRemountAllReportsEachAccount(t *testing.T) {
 		if msg, _ := row["error"].(string); msg == "" {
 			t.Errorf("失败必须带原因：%v", row)
 		}
+	}
+}
+
+// 日志是按账号过滤的：行里没有账号字段，所以靠 ID / 尾号 / 备注名 / 挂载点定位。
+func TestFilterLogsForAccount(t *testing.T) {
+	ac := &config.AccountConfig{
+		ID: "acc0123456789ab", Name: "家庭号", Account: "****9621",
+		MountPoint: "/vol4/1000/移动云盘",
+		StrmPairs:  []config.StrmPair{{Cloud: "/01影视", Local: "/vol4/1000/strm-test"}},
+	}
+	lines := []string{
+		"2026/11/07 16:50:28 已挂载 /vol4/1000/移动云盘（账号 ****9621，读写）",
+		"2026/11/07 16:50:28 批量重挂：账号「家庭号」已重挂",
+		"2026/11/07 16:40:58 STRM：/01影视 → /vol4/1000/strm-test 完成，共 31 个",
+		"2026/11/07 16:40:18 管理界面已启动: http://0.0.0.0:19898/",
+		"2026/11/07 16:41:00 WebDAV：/dav/acc0123456789ab/ 出错：io error",
+		"2026/11/07 16:41:01 已挂载 /vol4/1000/移动云盘-2（账号 ****8888，读写）",
+	}
+	got := filterLogsForAccount(lines, ac)
+	want := []string{lines[0], lines[1], lines[2], lines[4]}
+	if len(got) != len(want) {
+		t.Fatalf("过滤后行数 %d，期望 %d：%v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("第 %d 行不匹配：%q", i, got[i])
+		}
+	}
+	// 别的账号的行不能混进来（****8888 只是长得像）
+	for _, line := range got {
+		if strings.Contains(line, "****8888") {
+			t.Error("把另一台账号的日志也放进来了")
+		}
+	}
+	// 空账号 / 无线索时原样返回，不能把日志全吞了
+	if n := len(filterLogsForAccount(lines, nil)); n != len(lines) {
+		t.Errorf("nil 账号应原样返回，得到 %d 行", n)
+	}
+	if n := len(filterLogsForAccount(lines, &config.AccountConfig{ID: "accdeadbeef00"})); n != 0 {
+		t.Errorf("没有任何行提到这台账号时应返回 0 行，得到 %d", n)
+	}
+	// 前缀不算命中：/vol4/1000/移动云盘 不能把 -2 那台的行捞进来
+	if n := len(filterLogsForAccount([]string{"已挂载 /vol4/1000/移动云盘-2"}, &config.AccountConfig{MountPoint: "/vol4/1000/移动云盘"})); n != 0 {
+		t.Errorf("挂载点前缀不应命中，得到 %d 行", n)
 	}
 }

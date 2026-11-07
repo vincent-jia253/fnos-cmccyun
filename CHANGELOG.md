@@ -2,6 +2,20 @@
 
 版本号与应用内 `manifest` 的 `changelog` 字段保持一致；安装包在 [Releases](https://github.com/vincent-jia253/fnos-cmccyun/releases) 里。
 
+## v1.7.4
+
+账号页把动作摆到明面上，并补两件按账号的操作：
+
+- **导出拆两个按钮**：`导出` 只导结构配置（不含 `authorization` / `dav_password`），
+  同一行的 `含凭据` 才连凭据一起导（明文，点击前二次确认）。v1.7.3 把它藏成勾选框，实际找不到。
+- **每行「日志」**：`GET /api/logs?account=<id>` 按账号过滤，线索为账号 ID / 尾号 / 备注名 /
+  挂载点 / STRM 本地输出目录，且要求两侧是分隔符（避免 `/vol4/1000/移动云盘` 命中 `-2` 那台）；
+  日志页新增「只看当前账号」开关。
+- **每行「扫描」**：`POST /api/strm/scan?account=<id>`，立刻对那一台跑一轮 STRM，
+  结果汇总「共 N 个（更新 X，未变 Y）」。
+
+测试 120 → 121 项，`tests/multi-account-e2e.sh` 46 → 54 项，`functional.sh` 23/23。
+
 ## v1.7.3
 
 「账号」页补两件运维工具，多账号才用得顺手：
