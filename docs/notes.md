@@ -570,6 +570,7 @@ GO=go VERSION=1.3.2 ./build.sh   # 需要 Go 1.24+ 与 fnpack
 |---|---|---|
 | `functional.sh` | 对本地假后端跑端到端 FUSE 测试：读一致性（文本 / 3 MB / 25 MB）、10 次管道读、4 路并发读、Python `pread` 偏移扫描、写/改名/删除、12 MB 上传、30 MB 文件**局部改写**（校验暂存占用 <1 MB）、`ftruncate` 缩容 | **23 passed, 0 failed** |
 | `go test ./internal/...` | 单元测试：extents 区间合并、覆盖写入不整文件下载、截断语义、新建文件先 flush 后 write、令牌续期与形状回退、鉴权失败续期重试（含并发只续期一次、续期失败退避、新授权立即生效）、两处锁回归、**死锁看门狗（5 秒超时扫全部控制台入口 `Update(mount_point)` / `CheckMountPath` / `Status`…，超时即失败并打印 goroutine 栈）**、过期预签名地址重签、`vfs.Dead`（`ENOTCONN` 残留挂载识别）、**界面类名回归（`.sp` 只能当按钮里的加载指示器，不许当占位元素用）**、**「授权剩余天数」的悬停说明与可见文字解释必须存在（v1.3.2）**、**STRM 直链参数只拼一次（单问号）/ auto 模式挂载未就绪时跳过扫描且不记到点时间（v1.7.2）**、**挂载位置规则校验 / 非空目录确认 / 卷外与卷根拒绝 / 目录浏览与新建 / 切换位置后旧位置已卸载 / `mounted_at` 重启后可恢复 / 旧位置僵尸挂载自救 / 挂载点内部路径的识别与「先卸下再挪」/ 挂载点内禁止新建目录** | **116 tests, 全绿**（v1.7.2；`-race` 亦通过；FUSE 相关用例需 `CMCCYUN_TEST_FUSE=1`） |
+| `multi-account-e2e.sh` | **多账号端到端**：假后端上让**一个进程同时挂两棵 FUSE 树**（`mnt1` 读写 / `mnt2` 只读），校验两棵都在 `/proc/self/mountinfo`、目录列表与 `dd 64K` 都正常、只读是**分账号**的（只读那棵 `touch` 失败、读写那棵成功）、`/api/status` 一次报两台且 `read_only` 各自正确、`?account=<id>` 只描述那一台、删除第二台**只卸它自己**（`mnt1` 仍在且仍可读、`mounted_at` 清掉该账号、账号数回到 1） | **25 passed, 0 failed** |
 | `restart.sh` | 用假后端（`CMCCYUN_DEBUG_FAKE`）把守护进程挂在 `/tmp/cct/mnt`，管理台 19899 | ok |
 | `fnos-lifecycle.sh` | 在真机上验证 fnOS 生命周期：status 3 → start → status 0 → 挂载可见 → 跨用户读/写 → 幂等 start → stop → 0 残留挂载 | 全部通过 |
 | `fnos-fuse-check.sh` | 检查真实挂载点：`allow_other`、mount↔后端 `md5` 一致、root 与普通用户都能读写 | 通过 |
@@ -598,6 +599,7 @@ bash make-fixtures.sh    # 造 /tmp/cct/backend（文本 + 3 MB + 25 MB 假文�
 bash fake-daemon.sh start   # 隔离实例：cmccyun-test + 端口 19896（不碰线上真挂载）
 bash functional.sh       # 跑 23 项功能测试
 bash strm-e2e.sh /tmp/cmccyun-build/cmccyun   # STRM 端到端（假 139 服务 + 真守护进程）
+bash multi-account-e2e.sh /tmp/cmccyun-build/cmccyun   # 双账号同时挂载 / 只读隔离 / 删除只卸自己
 bash fake-daemon.sh stop
 ```
 
