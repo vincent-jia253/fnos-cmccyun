@@ -53,7 +53,9 @@ v1.7.0 引入多账号时带进来两个真问题，都是**在真机上跑出�
    所以不会白等一个间隔）；用户明确选了 path / url 的不受影响。
 
 真机实测：升级后第一轮把被改坏的那批收回本地路径（`更新 31`），之后连续两次重启都是
-`未变 31`、`.strm` 的 mtime 一个没动。测试 114 → **116 项**（`TestURLModeWithAccountHasSingleQuestionMark`、
+`未变 31`、`.strm` 的 mtime 一个没动。另有端到端脚本 `tests/strm-e2e.sh` 钉住这两点
+（用假 139 服务驱动真守护进程生成 `.strm`、真去 `curl` 直链；在故意还原成 v1.7.0 写法的
+二进制上它 4 项 FAIL，改回来 13/13）。测试 114 → **116 项**（`TestURLModeWithAccountHasSingleQuestionMark`、
 `TestStrmScanWaitsForMountInAutoMode`），`tests/functional.sh` 23/23。
 
 ### v1.7.1 变更：多账号下的 STRM 输出目录不再互相踩
@@ -567,12 +569,13 @@ GO=go VERSION=1.3.2 ./build.sh   # 需要 Go 1.24+ 与 fnpack
 | 脚本 | 作用 | 最近一次结果 |
 |---|---|---|
 | `functional.sh` | 对本地假后端跑端到端 FUSE 测试：读一致性（文本 / 3 MB / 25 MB）、10 次管道读、4 路并发读、Python `pread` 偏移扫描、写/改名/删除、12 MB 上传、30 MB 文件**局部改写**（校验暂存占用 <1 MB）、`ftruncate` 缩容 | **23 passed, 0 failed** |
-| `go test ./internal/...` | 单元测试：extents 区间合并、覆盖写入不整文件下载、截断语义、新建文件先 flush 后 write、令牌续期与形状回退、鉴权失败续期重试（含并发只续期一次、续期失败退避、新授权立即生效）、两处锁回归、**死锁看门狗（5 秒超时扫全部控制台入口 `Update(mount_point)` / `CheckMountPath` / `Status`…，超时即失败并打印 goroutine 栈）**、过期预签名地址重签、`vfs.Dead`（`ENOTCONN` 残留挂载识别）、**界面类名回归（`.sp` 只能当按钮里的加载指示器，不许当占位元素用）**、**「授权剩余天数」的悬停说明与可见文字解释必须存在（v1.3.2）**、**挂载位置规则校验 / 非空目录确认 / 卷外与卷根拒绝 / 目录浏览与新建 / 切换位置后旧位置已卸载 / `mounted_at` 重启后可恢复 / 旧位置僵尸挂载自救 / 挂载点内部路径的识别与「先卸下再挪」/ 挂载点内禁止新建目录** | **43 tests, 全绿**（`-race` 亦通过；FUSE 相关用例需 `CMCCYUN_TEST_FUSE=1`） |
+| `go test ./internal/...` | 单元测试：extents 区间合并、覆盖写入不整文件下载、截断语义、新建文件先 flush 后 write、令牌续期与形状回退、鉴权失败续期重试（含并发只续期一次、续期失败退避、新授权立即生效）、两处锁回归、**死锁看门狗（5 秒超时扫全部控制台入口 `Update(mount_point)` / `CheckMountPath` / `Status`…，超时即失败并打印 goroutine 栈）**、过期预签名地址重签、`vfs.Dead`（`ENOTCONN` 残留挂载识别）、**界面类名回归（`.sp` 只能当按钮里的加载指示器，不许当占位元素用）**、**「授权剩余天数」的悬停说明与可见文字解释必须存在（v1.3.2）**、**STRM 直链参数只拼一次（单问号）/ auto 模式挂载未就绪时跳过扫描且不记到点时间（v1.7.2）**、**挂载位置规则校验 / 非空目录确认 / 卷外与卷根拒绝 / 目录浏览与新建 / 切换位置后旧位置已卸载 / `mounted_at` 重启后可恢复 / 旧位置僵尸挂载自救 / 挂载点内部路径的识别与「先卸下再挪」/ 挂载点内禁止新建目录** | **116 tests, 全绿**（v1.7.2；`-race` 亦通过；FUSE 相关用例需 `CMCCYUN_TEST_FUSE=1`） |
 | `restart.sh` | 用假后端（`CMCCYUN_DEBUG_FAKE`）把守护进程挂在 `/tmp/cct/mnt`，管理台 19899 | ok |
 | `fnos-lifecycle.sh` | 在真机上验证 fnOS 生命周期：status 3 → start → status 0 → 挂载可见 → 跨用户读/写 → 幂等 start → stop → 0 残留挂载 | 全部通过 |
 | `fnos-fuse-check.sh` | 检查真实挂载点：`allow_other`、mount↔后端 `md5` 一致、root 与普通用户都能读写 | 通过 |
 | `fnos-reinstall.sh` | 「停 → 卸 → 清应用中心记录 → 全新安装 → 校验」的自动化流程 | 通过（安装日志无报错） |
 | `auth-recovery-demo.sh` | **端到端**验证鉴权恢复：`tools/fake139.py` 假 139 服务只认新令牌，用旧令牌启动**真实守护进程** → 首次请求被拒 → 自动续期 → 重试通过 → 挂载点列出云端内容、新令牌写回 `config.json`、日志出现 `[鉴权恢复]` | **9 passed, 0 failed** |
+| `strm-e2e.sh` | **STRM 端到端**：`tools/fake139.py` 假 139 服务给出一棵小目录树（`影视/电影/测试片.mkv`），用**真实守护进程**打开 url 模式 → 扫一轮 → 校验 `.strm` 里的直链**只有一个问号**、`a` / `id` / `k` 都在 → 真去 `curl` 那个直链拿到 **302 跳 CDN**、口令错 **403** → 再扫一轮判定 `未变 1` 且 mtime 不动 → 关掉开关后接口立刻报停用。**v1.7.0 的 `?a=default?id=…` 回归就是它钉住的**（拿故意改坏的二进制跑：9 passed / 4 failed） | **13 passed, 0 failed** |
 | `fnos-upgrade-sim.sh` | 模拟应用中心「覆盖升级」：解包覆盖 → `upgrade_init/upgrade_callback` → 校验 `config.json` 原样保留、服务能起、控制台 200 | 通过（1.2.1 → 1.3.0，配置原样保留、二进制 md5 已替换） |
 | `make-fixtures.sh` | 生成 `functional.sh` 需要的假云盘目录（`/tmp` 被清后重跑用） | 工具 |
 | `fake-daemon.sh` | 用假后端起一个**隔离**调试实例（二进制复制成 `cmccyun-test`、自己的配置与端口，不会误杀真机上正在跑的真挂载） | 工具 |
@@ -594,6 +597,7 @@ cd tests
 bash make-fixtures.sh    # 造 /tmp/cct/backend（文本 + 3 MB + 25 MB 假文件）
 bash fake-daemon.sh start   # 隔离实例：cmccyun-test + 端口 19896（不碰线上真挂载）
 bash functional.sh       # 跑 23 项功能测试
+bash strm-e2e.sh /tmp/cmccyun-build/cmccyun   # STRM 端到端（假 139 服务 + 真守护进程）
 bash fake-daemon.sh stop
 ```
 

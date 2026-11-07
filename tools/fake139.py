@@ -23,6 +23,25 @@ OLD = sys.argv[2]        # base64("pc:<acct>:<token>")
 NEW = sys.argv[3]        # base64("pc:<acct>:<token>") handed out by /refresh
 LOGF = sys.argv[4] if len(sys.argv) > 4 else "/tmp/fake139.log"
 
+# A tiny cloud tree: 根 → 影视 → 电影 → 测试片.mkv / 海报.jpg.
+# /file/list returns the children of parentFileId; /file/getDownloadUrl returns a
+# fake CDN link.  Keeping the tree here lets tests/strm-e2e.sh drive the
+# real daemon's STRM generator end to end (list → resolve → scan → play 302).
+TREE = {
+    "/": [
+        ("dir-1", "来自云端", "folder", 0, "2026-10-01T10:00:00"),
+        ("file-1", "鉴权恢复.txt", "file", 12, "2026-10-01T10:00:00"),
+        ("dir-v", "影视", "folder", 0, "2026-10-01T10:00:00"),
+    ],
+    "dir-v": [
+        ("dir-v2", "电影", "folder", 0, "2026-10-01T10:00:00"),
+    ],
+    "dir-v2": [
+        ("file-v", "测试片.mkv", "file", 8 << 30, "2026-10-01T10:00:00"),
+        ("file-p", "海报.jpg", "file", 1 << 20, "2026-10-01T10:00:00"),
+    ],
+}
+
 lock = threading.Lock()
 counts = {"old_rejected": 0, "new_ok": 0, "refresh": 0, "other": 0}
 
@@ -70,6 +89,12 @@ class Handler(BaseHTTPRequestHandler):
     def _handle(self):
         n = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(n) if n else b""
+        try:
+            payload = json.loads(raw or b"{}")
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
 
         if self.path.startswith("/refresh"):
             # AAS authTokenRefresh.do — the request carries the ticket, not the
@@ -111,14 +136,18 @@ class Handler(BaseHTTPRequestHandler):
                             {"modName": "personal", "httpsUrl": "http://127.0.0.1:%d" % PORT}]}})
             return
         if self.path.endswith("/file/list"):
+            parent = str(payload.get("parentFileId") or "/")
+            items = []
+            for fid, name, typ, size, ts in TREE.get(parent, []):
+                items.append({"fileId": fid, "name": name, "type": typ,
+                              "size": size, "createdAt": ts, "updatedAt": ts})
             self._send({"success": True, "code": "0", "message": "成功", "data": {
-                "items": [
-                    {"fileId": "dir-1", "name": "来自云端", "type": "folder",
-                     "size": 0, "createdAt": "2026-10-01T10:00:00", "updatedAt": "2026-10-01T10:00:00"},
-                    {"fileId": "file-1", "name": "鉴权恢复.txt", "type": "file",
-                     "size": 12, "createdAt": "2026-10-01T10:00:00", "updatedAt": "2026-10-01T10:00:00"},
-                ],
-                "nextPageCursor": ""}})
+                "items": items, "nextPageCursor": ""}})
+            return
+        if self.path.endswith("/file/getDownloadUrl"):
+            fid = str(payload.get("fileId") or "")
+            self._send({"success": True, "code": "0", "message": "成功", "data": {
+                "cdnUrl": "http://127.0.0.1:%d/cdn/%s?sig=stub" % (PORT, fid)}})
             return
         # Anything else: a permissive empty success, so the mount can proceed.
         self._send({"success": True, "code": "0", "message": "成功", "data": {}})
