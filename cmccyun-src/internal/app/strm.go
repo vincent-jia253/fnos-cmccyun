@@ -6,9 +6,9 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,12 +80,28 @@ func (s *Service) strmPlayURL(cfg config.Config, id string) string {
 	if ips := localIPv4(); len(ips) > 0 {
 		host = ips[0]
 	}
-	// a= 带上账号，播放时才知道该用哪台云盘的授权和口令。
-	if id != "" {
-		return fmt.Sprintf("http://%s:%d/api/strm/play?a=%s", host, cfg.WebPort, url.QueryEscape(id))
-	}
+	// 只返回前缀：a= / id= / k= 由 strm.render 用 url.Values 一次拼好。
+	// 这里原来自己接了 "?a=<id>"，和后面接的 "?id=…" 撞成两个问号（v1.7.0 的 bug）。
 	return fmt.Sprintf("http://%s:%d/api/strm/play", host, cfg.WebPort)
 }
+
+// strmWaitsMount 判断「现在扫会写错内容，得等挂载就绪」。
+//
+// auto 模式按「挂载在不在」挑本地路径还是直链，但开机时挂载和 STRM 定时器是同时
+// 起步的：先扫一轮就会把 .strm 全改写成直链，等挂载上来又改回路径——媒体库每次
+// 开机都整库重扫。auto 且开着自动挂载时，挂载没就绪就先不扫（30 秒后再试）。
+func strmWaitsMount(cfg config.Config, ac config.AccountConfig) bool {
+	if ac.StrmMode != "" && ac.StrmMode != "auto" {
+		return false // 用户明确选了 path / url，尊重它
+	}
+	if ac.MountPoint == "" || !cfg.AutoMount {
+		return false
+	}
+	return !vfs.IsMountPoint(ac.MountPoint)
+}
+
+// errStrmNotMounted 表示这一轮被跳过了（不是失败），调度器别记「到点时间」。
+var errStrmNotMounted = errors.New("挂载还没就绪，等挂好再扫")
 
 // strmMode 决定这次用哪种内容形式：auto 时挂载在线用 path，否则退回 url。
 func strmMode(ac config.AccountConfig) string {
@@ -165,6 +181,9 @@ func (s *Service) runStrm(ctx context.Context, id string) ([]StrmPairResult, err
 	if len(ac.StrmPairs) == 0 {
 		return nil, fmt.Errorf("还没有配置「云端目录 → 本地目录」映射")
 	}
+	if strmWaitsMount(cfg, *ac) {
+		return nil, errStrmNotMounted
+	}
 	c, err := s.connect(ctx, ac.ID)
 	if err != nil {
 		return nil, err
@@ -205,6 +224,7 @@ func (s *Service) runStrm(ctx context.Context, id string) ([]StrmPairResult, err
 			Mode:          mode,
 			MountPrefix:   mountPrefix,
 			URLBase:       urlBase,
+			AccountID:     ac.ID,
 			Token:         ac.StrmToken,
 			Exts:          exts,
 			DeleteMissing: ac.StrmDeleteMissing,
@@ -250,7 +270,9 @@ func (s *Service) StrmScan(ctx context.Context, id string) ([]StrmPairResult, er
 
 	a.strmMu.Lock()
 	a.strmRunning = false
-	a.strmLastAt = time.Now()
+	if !errors.Is(err, errStrmNotMounted) {
+		a.strmLastAt = time.Now()
+	}
 	a.strmLast = res
 	if err != nil {
 		a.strmLastErr = err.Error()
@@ -273,7 +295,7 @@ func (s *Service) StrmLoop(ctx context.Context) {
 				continue
 			}
 			sctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
-			if _, err := s.StrmScan(sctx, ac.ID); err != nil {
+			if _, err := s.StrmScan(sctx, ac.ID); err != nil && !errors.Is(err, errStrmNotMounted) {
 				s.logf("STRM：定时扫描失败（账号 %s）：%v", ac.DisplayName(), err)
 			}
 			cancel()

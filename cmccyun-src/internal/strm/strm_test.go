@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/vincent-jia253/fnos-cmccyun/internal/api"
+	"net/url"
 )
 
 // fakeCloud 是一棵内存里的目录树，够测「扫描 + diff」了。
@@ -295,5 +296,35 @@ func TestOptionsValidation(t *testing.T) {
 		if _, _, err := Run(context.Background(), o, nil); err == nil {
 			t.Errorf("第 %d 个非法参数没有报错", i)
 		}
+	}
+}
+
+// 多账号：a= 必须和其它参数一起用 url.Values 拼，地址里只能有一个问号。
+// v1.7.0 是 "前缀?a=<id>" + "?id=…&k=…" 两段接的，生成出两个问号，
+// 播放器把 id 当成 a 的一部分，直链直接 400。
+func TestURLModeWithAccountHasSingleQuestionMark(t *testing.T) {
+	f := newFake()
+	seedTree(f)
+	out := t.TempDir()
+	o := opts(t, f, out, "url")
+	o.AccountID = "acc93cbc2179f32"
+	if _, _, err := Run(context.Background(), o, nil); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.TrimSpace(readFile(t, filepath.Join(out, "电影", "沙丘2.mkv.strm")))
+	if strings.Count(got, "?") != 1 {
+		t.Fatalf("直链里有 %d 个问号：%q", strings.Count(got, "?"), got)
+	}
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("直链解析失败：%v", err)
+	}
+	q := u.Query()
+	if q.Get("id") != "f1" || q.Get("k") != "tk123" || q.Get("a") != "acc93cbc2179f32" {
+		t.Fatalf("参数不对：%q -> id=%q k=%q a=%q", got, q.Get("id"), q.Get("k"), q.Get("a"))
+	}
+	// 参数集合就该是这三个，不能多出被拼坏的那种键（例如 "a" 的值吃掉 "?id"）。
+	if len(q) != 3 {
+		t.Fatalf("参数条目 = %d 个：%q", len(q), got)
 	}
 }

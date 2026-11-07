@@ -55,7 +55,10 @@ type Options struct {
 	// MountPrefix 是 path 模式下云盘挂载到本机的位置。
 	MountPrefix string
 	// URLBase 是 url 模式下的直链前缀（形如 http://192.168.1.2:19898/api/strm/play）。
+	// 只写前缀，不要自己带 ?xxx=，参数统一由这里拼。
 	URLBase string
+	// AccountID 是 url 模式带的账号（a= 参数），多账号时播放才知道用哪台的授权。
+	AccountID string
 	// Token 是 url 模式带的访问口令（k= 参数），空表示不带。
 	Token string
 
@@ -263,10 +266,18 @@ func walk(ctx context.Context, o Options, rel, id string, out map[string]Item, r
 func render(o Options, it Item) string {
 	var line string
 	if o.Mode == "url" {
-		line = o.URLBase + "?id=" + url.QueryEscape(it.ID)
+		// 参数一律用 url.Values 拼：早期版本是手工 "%s?a=%s" + "?id=..." 两段接起来的，
+		// 结果生成出 ".../play?a=default?id=…&k=…" 这种两个问号的地址，
+		// 播放器把 id 当成 a 的一部分，点开就是 400。顺序不敏感，服务端都按 key 取。
+		q := url.Values{}
+		q.Set("id", it.ID)
 		if o.Token != "" {
-			line += "&k=" + url.QueryEscape(o.Token)
+			q.Set("k", o.Token)
 		}
+		if o.AccountID != "" {
+			q.Set("a", o.AccountID)
+		}
+		line = o.URLBase + "?" + q.Encode()
 	} else {
 		// path 模式直接写本地绝对路径（UTF-8 原样）：媒体库读的是文件系统，
 		// 百分号编码过的路径在本地是找不到的。中文路径老版本影视解析不了，

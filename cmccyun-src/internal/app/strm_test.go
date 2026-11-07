@@ -1,8 +1,10 @@
 package app
 
 import (
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -230,5 +232,55 @@ func TestStrmStateMigrationFromLegacyName(t *testing.T) {
 	s.migrateLegacyStrmState("acc-not-default", other)
 	if _, err := os.Stat(s.strmStatePath("acc-not-default", other)); err == nil {
 		t.Error("非默认账号把别人的老快照抢走了")
+	}
+}
+
+// auto 模式下「挂载还没就绪」不能扫：那时会算成 url，把 .strm 全改写成直链，
+// 等挂载上来又得改回本地路径 —— 媒体库每次开机整库重扫。
+// 跳过也不能记「到点时间」，否则要等满一个间隔才重试。
+func TestStrmScanWaitsForMountInAutoMode(t *testing.T) {
+	s, root := newMountSvc(t, "")
+	ac := acct0(s.cfg)
+	ac.MountPoint = filepath.Join(root, "not-mounted")
+	ac.StrmEnabled = true
+	ac.StrmMode = "auto"
+	ac.StrmPairs = []config.StrmPair{{Cloud: "/01影视", Local: filepath.Join(root, "out")}}
+	s.cfg.AutoMount = true
+	snap := s.Config()
+	if err := config.Save(s.cfgPath, &snap); err != nil {
+		t.Fatal(err)
+	}
+	if !strmWaitsMount(snap, acctView(snap)) {
+		t.Fatal("auto + 自动挂载 + 挂载点不存在，应该判定为「等挂载」")
+	}
+
+	if _, err := s.StrmScan(context.Background(), ""); !errors.Is(err, errStrmNotMounted) {
+		t.Fatalf("没挂上就扫了：%v", err)
+	}
+	s.mu.Lock()
+	a, _, _ := s.acctLocked("")
+	s.mu.Unlock()
+	a.strmMu.Lock()
+	lastAt, lastErr := a.strmLastAt, a.strmLastErr
+	a.strmMu.Unlock()
+	if !lastAt.IsZero() {
+		t.Error("被跳过的这一轮不该记「到点时间」，否则要等满一个间隔才重试")
+	}
+	if !strings.Contains(lastErr, "挂载") {
+		t.Errorf("状态里该说明在等挂载，实际 %q", lastErr)
+	}
+
+	// 用户明确选了 url：不拦，直链本来就不依赖挂载。
+	ac2 := acctView(snap)
+	ac2.StrmMode = "url"
+	if strmWaitsMount(snap, ac2) {
+		t.Error("显式 url 模式不该等挂载")
+	}
+	// 没开自动挂载：用户就是不想挂，auto 只能走直链，也不拦。
+	ac3 := acctView(snap)
+	cfg3 := snap
+	cfg3.AutoMount = false
+	if strmWaitsMount(cfg3, ac3) {
+		t.Error("没开自动挂载时不该等")
 	}
 }
