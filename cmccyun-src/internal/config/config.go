@@ -63,6 +63,23 @@ type Config struct {
 	// DAVRedirect 让 GET 直接 302 到云盘 CDN 签名链接（不占用 NAS 带宽）。
 	// 用指针是为了区分「没配过」和「配成 false」，默认开。
 	DAVRedirect *bool `json:"dav_redirect,omitempty"`
+
+	// STRM* 是「把云端影视文件生成 .strm 给影视/Emby 用」的配置。
+	StrmEnabled       bool       `json:"strm_enabled"`
+	StrmPairs         []StrmPair `json:"strm_pairs,omitempty"`
+	StrmMode          string     `json:"strm_mode,omitempty"`           // auto | path | url
+	StrmExt           string     `json:"strm_ext,omitempty"`            // 逗号分隔，空=内置白名单
+	StrmIntervalMin   int        `json:"strm_interval_min,omitempty"`   // 0 = 5 分钟
+	StrmDeleteMissing bool       `json:"strm_delete_missing,omitempty"` // 云端没了就删本地 strm
+	StrmToken         string     `json:"strm_token,omitempty"`          // url 模式的访问口令
+}
+
+// StrmPair 是一条「云端目录 → 本地输出目录」的映射。
+type StrmPair struct {
+	// Cloud 是云端路径（形如 /01影视/电影），空表示云盘根目录。
+	Cloud string `json:"cloud"`
+	// Local 是本地输出根目录（绝对路径）。
+	Local string `json:"local"`
 }
 
 // DAVRedirectOn reports whether GETs should be answered with a redirect to the
@@ -140,6 +157,12 @@ func Load(path string) (*Config, error) {
 	if c.DAVUser == "" {
 		c.DAVUser = DefaultDAVUser
 	}
+	if c.StrmMode == "" {
+		c.StrmMode = "auto"
+	}
+	if c.StrmIntervalMin <= 0 {
+		c.StrmIntervalMin = 5
+	}
 	return c, nil
 }
 
@@ -178,26 +201,33 @@ func ParseMode(s string, fallback uint32) uint32 {
 func (c *Config) Mask() map[string]any {
 	hasToken := c.Authorization != ""
 	return map[string]any{
-		"authorization_set": hasToken,
-		"account":           c.Account,
-		"mount_point":       c.MountPoint,
-		"read_only":         c.ReadOnly,
-		"uid":               c.UID,
-		"gid":               c.GID,
-		"file_perm":         c.FilePerm,
-		"dir_perm":          c.DirPerm,
-		"dir_cache_ttl":     c.DirCacheTTL,
-		"upload_part_mb":    c.UploadPartMB,
-		"client_type":       c.ClientType,
-		"capacity_gb":       c.CapacityGB,
-		"stage_dir":         c.StageDir,
-		"log_file":          c.LogFile,
-		"web_listen":        c.WebListen,
-		"web_port":          c.WebPort,
-		"auto_mount":        c.AutoMount,
-		"dav_enabled":       c.DAVEnabled,
-		"dav_user":          c.DAVUser,
-		"dav_redirect":      c.DAVRedirectOn(),
-		"dav_password_set":  c.DAVPassword != "",
+		"authorization_set":   hasToken,
+		"account":             c.Account,
+		"mount_point":         c.MountPoint,
+		"read_only":           c.ReadOnly,
+		"uid":                 c.UID,
+		"gid":                 c.GID,
+		"file_perm":           c.FilePerm,
+		"dir_perm":            c.DirPerm,
+		"dir_cache_ttl":       c.DirCacheTTL,
+		"upload_part_mb":      c.UploadPartMB,
+		"client_type":         c.ClientType,
+		"capacity_gb":         c.CapacityGB,
+		"stage_dir":           c.StageDir,
+		"log_file":            c.LogFile,
+		"web_listen":          c.WebListen,
+		"web_port":            c.WebPort,
+		"auto_mount":          c.AutoMount,
+		"dav_enabled":         c.DAVEnabled,
+		"dav_user":            c.DAVUser,
+		"dav_redirect":        c.DAVRedirectOn(),
+		"dav_password_set":    c.DAVPassword != "",
+		"strm_enabled":        c.StrmEnabled,
+		"strm_mode":           c.StrmMode,
+		"strm_ext":            c.StrmExt,
+		"strm_interval_min":   c.StrmIntervalMin,
+		"strm_delete_missing": c.StrmDeleteMissing,
+		"strm_token_set":      c.StrmToken != "",
+		"strm_pairs":          c.StrmPairs,
 	}
 }

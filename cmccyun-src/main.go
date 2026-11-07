@@ -380,6 +380,8 @@ func run(cfgPath string) int {
 	// Keep a long-running mount alive: the pasted ticket expires in roughly 30
 	// days and the service can renew it silently while it is still valid.
 	go s.AuthLoop(ctx)
+	// 影视 STRM 的定时扫描（默认 5 分钟，未启用时空转，成本约等于零）。
+	go s.StrmLoop(ctx)
 	if cfg.AutoMount {
 		mctx, mcancel := context.WithTimeout(ctx, 120*time.Second)
 		if err := s.Mount(mctx); err != nil {

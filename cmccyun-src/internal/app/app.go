@@ -55,6 +55,12 @@ type Service struct {
 	// davFS 是内置 WebDAV 服务端的文件系统（见 dav.go）。缓存跟着它走，
 	// 换账号/改只读时置空重建。
 	davFS *dav.FS
+	// STRM 插件的运行态（见 strm.go）：只保护「上一轮扫描」，与 s.mu 无关。
+	strmMu      sync.Mutex
+	strmRunning bool
+	strmLastAt  time.Time
+	strmLastErr string
+	strmLast    []StrmPairResult
 }
 
 // New loads the configuration and prepares logging.

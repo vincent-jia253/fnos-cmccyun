@@ -391,6 +391,7 @@ const indexHTML = `<!DOCTYPE html>
       <button class="tab" data-tab="auth">授权</button>
       <button class="tab" data-tab="browse">云盘浏览</button>
       <button class="tab" data-tab="dav">远程挂载</button>
+      <button class="tab" data-tab="strm">影视 STRM</button>
       <button class="tab" data-tab="logs">运行日志</button>
     </nav>
 
@@ -638,6 +639,73 @@ const indexHTML = `<!DOCTYPE html>
       </div>
     </section>
 
+    <!-- ===== 影视 STRM ===== -->
+    <section class="panel" id="tab-strm">
+      <div class="card">
+        <div class="hd">
+          <h2>影视 STRM</h2><span class="tag" id="strmState">未启用</span>
+          <span class="sub">把云盘里的影视文件生成 .strm，给飞牛影视 / Emby 当索引用</span>
+        </div>
+        <div class="bd">
+          <div class="checkline" style="height:34px">
+            <input id="strmEnabled" type="checkbox" />
+            <span>启用：按下面的映射定时扫描云端并生成 .strm</span>
+          </div>
+
+          <label style="margin-top:12px">映射（云端目录 → 本地输出目录）</label>
+          <div id="strmPairs"></div>
+          <div class="actions" style="margin-top:4px">
+            <button id="btnStrmAdd" class="sm">+ 添加一条映射</button>
+          </div>
+
+          <div class="grid" style="margin-top:14px">
+            <div>
+              <label>内容形式</label>
+              <select id="strmMode">
+                <option value="auto">自动（挂载在线写本地路径，否则写直链）</option>
+                <option value="path">本地路径（媒体库直接读挂载里的文件）</option>
+                <option value="url">直链（http，不依赖挂载）</option>
+              </select>
+            </div>
+            <div><label>扫描间隔（分钟）</label><input id="strmInterval" type="number" min="1" max="1440" /></div>
+            <div><label>视频扩展名（逗号分隔，留空用内置）</label><input id="strmExt" placeholder="mp4,mkv,avi,ts,m2ts,iso,wmv,flv,mov,rmvb,m4v,webm" /></div>
+            <div>
+              <label>云端删掉的文件也删本地 .strm</label>
+              <div class="checkline" style="height:38px"><input id="strmDel" type="checkbox" /> <span>关掉则只增不删</span></div>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button id="btnStrmSave" class="primary">保存</button>
+            <button id="btnStrmScan">立即扫描</button>
+          </div>
+          <div id="msgStrm" class="msg"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="hd"><h2>扫描结果</h2><span class="sub" id="strmMeta">还没有扫过</span></div>
+        <div class="bd"><div id="strmResults" class="hint">保存配置后点「立即扫描」。</div></div>
+      </div>
+
+      <div class="card">
+        <div class="hd"><h2>怎么接影视 / Emby</h2><span class="sub">生成的 .strm 就是普通文件，媒体库按目录扫即可</span></div>
+        <div class="bd">
+          <ol class="steps">
+            <li>挑一个<b>不在云盘挂载点里</b>的目录当输出，例如 <code class="k">/vol1/media/strm</code>（不能在挂载点里，否则会写到云端）。</li>
+            <li>映射填：云端 <code class="k">/01影视</code> → 本地 <code class="k">/vol1/media/strm/01影视</code>，保存。</li>
+            <li>飞牛影视：媒体库 → 添加 → 选电影/电视剧 → 目录选这个本地目录 → 扫描。</li>
+            <li>Emby：添加媒体库 → 选内容类型 → 文件夹选该目录 → 扫描媒体库。</li>
+          </ol>
+          <div class="hint">
+            <b>path 模式</b>写的是挂载点里的真实路径：播放走 FUSE，必须挂着，但省流量。<br>
+            <b>url 模式</b>写 http 直链（带口令）：播放时 302 跳到云盘 CDN，不依赖挂载、拖进度条正常，媒体服务要能访问本机这个端口。<br>
+            云端改名/移动不会留旧条目（下一轮会把旧 .strm 换掉）；云端删掉的文件默认也会一起收走。
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- ===== 日志 ===== -->
     <section class="panel" id="tab-logs">
       <div class="card">
@@ -810,6 +878,7 @@ function showTab(name) {
   }
   if (name === "logs") loadLogs();
   if (name === "dav") loadDav();
+  if (name === "strm") loadStrm();
   if (name === "browse" && !browseLoaded && lastSt && lastSt.has_token) { browseLoaded = true; browse("/"); }
   // 第一次进「授权」页又没授权时，直接把二维码摆出来——少点一次按钮
   if (name === "auth" && !qrAutoStarted && lastSt && !lastSt.has_token) { qrAutoStarted = true; qrStart(); }
@@ -817,6 +886,123 @@ function showTab(name) {
 document.querySelectorAll(".tab").forEach(function (b) {
   b.onclick = function () { showTab(b.dataset.tab); };
 });
+
+/* ---------------- 影视 STRM ---------------- */
+var strmData = null;
+
+function strmRow(p) {
+  var d = document.createElement("div");
+  d.className = "row nowrap";
+  d.style.marginBottom = "8px";
+  d.innerHTML =
+    '<input class="scloud" spellcheck="false" placeholder="/01影视" value="' + esc((p && p.cloud) || "") + '" style="flex:1 1 38%" />' +
+    '<span class="hint" style="flex:0 0 auto;padding:0 2px">→</span>' +
+    '<input class="slocal" spellcheck="false" placeholder="/vol1/media/strm" value="' + esc((p && p.local) || "") + '" style="flex:1 1 42%" />' +
+    '<button class="sm spick" style="flex:0 0 auto">选本地…</button>' +
+    '<button class="sm sdel" style="flex:0 0 auto">删</button>';
+  d.querySelector(".spick").onclick = function () {
+    openPicker(function (path) { d.querySelector(".slocal").value = path; });
+  };
+  d.querySelector(".sdel").onclick = function () { d.remove(); };
+  return d;
+}
+
+function strmPairsFromDom() {
+  var out = [];
+  var rows = document.querySelectorAll("#strmPairs .row");
+  for (var i = 0; i < rows.length; i++) {
+    var c = rows[i].querySelector(".scloud").value.trim();
+    var l = rows[i].querySelector(".slocal").value.trim();
+    if (!l) continue;
+    out.push({ cloud: c, local: l });
+  }
+  return out;
+}
+
+function strmShow(d) {
+  strmData = d || {};
+  $("strmEnabled").checked = !!strmData.enabled;
+  $("strmMode").value = strmData.mode_setting || "auto";
+  $("strmInterval").value = strmData.interval_min || 5;
+  $("strmExt").value = strmData.ext || "";
+  $("strmDel").checked = !!strmData.delete_missing;
+  $("strmState").textContent = strmData.enabled ? "已启用" : "未启用";
+
+  var box = $("strmPairs");
+  box.innerHTML = "";
+  var list = strmData.pairs || [];
+  if (!list.length) { box.appendChild(strmRow(null)); }
+  for (var i = 0; i < list.length; i++) box.appendChild(strmRow(list[i]));
+
+  var meta = [];
+  if (strmData.last_at) meta.push("上次扫描 " + String(strmData.last_at).slice(0, 19).replace("T", " "));
+  meta.push("当前内容形式：" + (strmData.mode === "path" ? "本地路径" : "直链") + (strmData.mode_setting === "auto" ? "（自动判定）" : ""));
+  if (strmData.enabled && !strmData.mount_ready && strmData.mode === "url") meta.push("挂载未在线，已自动用直链");
+  $("strmMeta").textContent = meta.join(" · ");
+
+  var r = strmData.last;
+  var html = "";
+  if (r && r.length) {
+    for (var j = 0; j < r.length; j++) {
+      var x = r[j];
+      var line = "<div><b>" + esc(x.cloud || "/") + "</b> → <code class=\"k\">" + esc(x.local) + "</code>：共 " + x.total +
+        " 个（新增 " + x.added + "，更新 " + x.updated + "，删除 " + x.removed + "），" + x.duration_ms + " ms";
+      if (x.truncated) line += " <b>（条目太多，已截断）</b>";
+      if (x.error) line += " <span style=\"color:#d33\">失败：" + esc(x.error) + "</span>";
+      if (x.errors && x.errors.length) line += "<div class=\"hint\">" + x.errors.slice(0, 3).map(esc).join("<br>") + "</div>";
+      line += "</div>";
+      html += line;
+    }
+  } else {
+    html = strmData.enabled ? "还没有扫描记录。" : "启用后保存，再点「立即扫描」。";
+  }
+  $("strmResults").innerHTML = html;
+}
+
+async function loadStrm() {
+  try { var d = await api("/api/strm/status"); strmShow(d.strm); }
+  catch (e) { say("msgStrm", e.message, false); }
+}
+
+async function strmSave() {
+  var body = {
+    enabled: $("strmEnabled").checked,
+    mode: $("strmMode").value,
+    interval_min: Number($("strmInterval").value) || 5,
+    ext: $("strmExt").value,
+    delete_missing: $("strmDel").checked,
+    pairs: strmPairsFromDom()
+  };
+  var b = $("btnStrmSave");
+  busy(b, true);
+  try {
+    var d = await api("/api/strm/config", { method: "POST", body: JSON.stringify(body) });
+    strmShow(d.strm);
+    say("msgStrm", body.enabled ? "已保存，之后每 " + body.interval_min + " 分钟自动同步一次" : "已保存，定时扫描已关闭", true);
+  } catch (e) {
+    say("msgStrm", e.message, false);
+  } finally { busy(b, false); }
+}
+
+async function strmScan() {
+  var b = $("btnStrmScan");
+  busy(b, true, "扫描中…");
+  say("msgStrm", "正在扫描云端目录并写 .strm，目录大的话要几分钟…");
+  try {
+    var d = await api("/api/strm/scan", { method: "POST", timeout: 900000 });
+    strmShow(d.strm);
+    var n = 0;
+    (d.results || []).forEach(function (x) { n += x.total || 0; });
+    say("msgStrm", "扫描完成：共 " + n + " 个视频", true);
+  } catch (e) {
+    say("msgStrm", e.message, false);
+    try { var s2 = await api("/api/strm/status"); strmShow(s2.strm); } catch (e2) {}
+  } finally { busy(b, false); }
+}
+
+$("btnStrmSave").onclick = strmSave;
+$("btnStrmScan").onclick = strmScan;
+$("btnStrmAdd").onclick = function () { $("strmPairs").appendChild(strmRow(null)); };
 
 /* ---------------- 远程挂载（WebDAV） ---------------- */
 var davData = null;
@@ -1532,6 +1718,14 @@ async function pickLinks() {
 
 async function pickApply() {
   var path = pickSel;
+  if (pickCb) {
+    if (!path || path === "/") { say("pickMsg", "先选一个目录（不能用存储卷根）", false); return; }
+    var cb = pickCb;
+    pickCb = null;
+    showPicker(false);
+    cb(path);
+    return;
+  }
   if (!path || path === "/") { say("pickMsg", "先在左边的树里选一个目录（不能挂在存储卷根上）", false); return; }
   var force = $("pickForce").checked;
   var b = $("pickApply");
@@ -1564,7 +1758,10 @@ async function pickApply() {
   busy(b, false);
 }
 
-function openPicker() {
+var pickCb = null;   // 非空时，选完目录回填给调用者（STRM 映射用），不触发挂载
+
+function openPicker(cb) {
+  pickCb = (typeof cb === "function") ? cb : null;
   showPicker(true);
   say("pickMsg", "");
   pickCache = {};   // 每次打开都重新读，避免卸载/新建之后看到旧内容
@@ -1574,8 +1771,8 @@ function openPicker() {
   openPath(start);
 }
 
-$("btnPick").onclick = openPicker;
-$("btnPick2").onclick = openPicker;
+$("btnPick").onclick = function () { openPicker(); };
+$("btnPick2").onclick = function () { openPicker(); };
 $("pickClose").onclick = function () { showPicker(false); };
 $("pickApply").onclick = pickApply;
 $("pickShowSys").onchange = function () { renderTree(); renderList(); };

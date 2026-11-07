@@ -37,6 +37,57 @@
    > **实测（2026-10-12 真实账号）**：手动点「刷新令牌」→ 新到期 2026-11-11 00:40（整整 30.0 天），
    > 新令牌已写回 `config.json`，随后用新凭据列云端目录 / 真读文件都正常 —— 续期确实有效，30 天到期不会断。
 
+### v1.6.0 变更：影视 STRM —— 片库放云盘，NAS 上只放指针
+
+飞牛影视原生支持 `.strm`（`/var/apps/trim.media/i18n/zh` 的 changelog 里就有「修复部分 strm 链接含中文或特殊字符时无法播放」），
+Emby 同理。所以这一版做一个生成器：扫云端目录，把每个视频写成一个 `.strm`，媒体服务器照常刮削。
+
+**分层**
+
+- `internal/strm/strm.go`：纯逻辑，不碰 Service/HTTP。`Options{Backend, CloudRootID, OutputDir, Mode, MountPrefix, URLBase, Token, Exts, DeleteMissing, Logf, MaxEntries}`，
+  `Run(ctx, opt, prev State) (State, Result, error)` 干三件事：扫描 → 与上一份快照 diff → 落盘。
+  `Backend` 只要 `List` + `DownloadURL` 两个方法，所以测试里能用 `fakeCloud` 完全离线跑。
+- `internal/app/strm.go`：Service 侧，负责认证态、路径解析（云端路径 → fileId，逐级 list 下钻）、
+  状态文件落位、定时器、HTTP 接口。`strmRunning` 互斥，点「立即扫描」不会和定时任务撞车。
+- 配置：`strm_enabled`、`strm_pairs[{cloud, local}]`、`strm_mode`（auto/path/url）、`strm_ext`、
+  `strm_interval_min`（默认 5）、`strm_delete_missing`、`strm_token`；`Mask()` 里只回 `strm_token_set`，不回明文。
+
+**diff 的规矩（这几条决定了它能不能长期跑）**
+
+| 情况 | 动作 |
+|---|---|
+| 云端新增 | 写新 strm |
+| 大小 / 修改时间变了 | 重写 |
+| 一模一样 | **跳过：不写、不动 mtime** —— 否则每 5 分钟一次，媒体库会不停重扫 |
+| 云端改名（同 fileId、Rel 变） | 删旧路径、写新路径 |
+| 云端删除 | 只有 `DeleteMissing` 才删本地，并自底向上收空目录 |
+
+状态文件 `<cfgdir>/strm-state/<sha1(cloud|local)[:6].json>`，一份映射一个，换映射互不污染。
+
+**path / url 两种写法**
+
+- path：`filepath.Join(MountPrefix, FromSlash(Rel))`，播放走 FUSE，任意 seek；
+- url：`URLBase + "?id=" + QueryEscape(id) + "&k=" + QueryEscape(token)`，`/api/strm/play` 校验 `k`
+  （`subtle.ConstantTimeCompare`）后 302 到 CDN 签名链接——CDN 支持 Range（实测 206），拖动正常，NAS 不转发流量。
+- `auto` 判定：挂载在线 → path，否则 → url；显式配置优先。**url 模式保存时若没 token 自动生成**。
+
+**真机踩到的 bug（已修，进版本）**
+
+第一轮扫 31 个影片，"成功"，然后 `ls` 全报 No such file：strm 内容写成了
+`/vol4/1000/移动云盘/学爸 (2023)/学爸 (2023) - 2160p.mp4`，少了云端子路径 `01影视/01求片/电影/华语电影`。
+根因是 app 层传 `MountPrefix: cfg.MountPoint`，而 `strm.Run` 拼的是 `MountPrefix + Rel`，`Rel` 是相对**映射根**的。
+修法：抽了个 `strmMountPrefix(mountPoint, cloudPath)`（云端路径为 `/` 或空时自然退化成挂载点根），
+顺手加了 `TestStrmMountPrefix` 五组断言防回归。这类 bug 单测不写就只能在真机上发现——
+"扫描成功、ADDED 31" 的日志看着完全正常。
+
+**实测数据（真机 v1.6.0 dev 二进制）**
+
+- 映射 `/01影视/01求片/电影/华语电影` → `/vol4/1000/strm-test`，31 个影片：首次 **7.1 s / added 31**；
+  第二次 **5.7 s / updated 0 / skipped 31**；改完前缀后启动补扫 **6.2 s / updated 31**，再扫 31 未变。
+- path 模式：3.3 GB 4K 影片的 strm，`dd bs=65536 count=1` 读出 65536 字节；`ls -l` 见到 3322769172 字节。
+- url 模式：`curl -sL -r 0-1023` → `code=206 bytes=1024`；`curl -sI` → `302` + CDN `Location`。
+- 测试：102 项（新增 `internal/strm` 8 项、app 层 7 项、路径回归 1 项），`functional.sh` 23/23。
+
 ### v1.5.0 变更：远程挂载（WebDAV）—— 换一条「飞牛自己挂」的路
 
 **背景**：用户想把云盘塞进飞牛「远程挂载」里那三张网盘卡片。逆向结论是那三张卡片
@@ -364,7 +415,7 @@ tail -f /var/log/apps/cmccyun.log              # 安装/升级脚本的诊断输
 
 **卸载**：在应用中心界面点卸载即可（先自动停服务、卸挂载）。
 `appcenter-cli uninstall` 在飞牛上会被拒绝（提示「请在 Web UI 卸载」），
-命令行环境下可执行 `generated/tests/fnos-reinstall.sh` 里的手工流程：
+命令行环境下可执行 `tests/fnos-reinstall.sh` 里的手工流程：
 
 ```bash
 sudo appcenter-cli stop cmccyun
@@ -401,7 +452,7 @@ GO=go VERSION=1.3.2 ./build.sh   # 需要 Go 1.24+ 与 fnpack
 `build.sh` 会交叉编译 linux/amd64 与 linux/arm64 两个静态二进制（`CGO_ENABLED=0`）、
 同步 `manifest` 里的版本号、整理进包文件权限，最后调 `fnpack build` 出包。
 
-### 测试脚本（均在 `generated/tests/`，需 root 的部分用 `sudo bash`）
+### 测试脚本（均在 `tests/`，需 root 的部分用 `sudo bash`）
 
 | 脚本 | 作用 | 最近一次结果 |
 |---|---|---|
@@ -429,7 +480,7 @@ GO=go VERSION=1.3.2 ./build.sh   # 需要 Go 1.24+ 与 fnpack
 开发调试（不需要真云盘）：
 
 ```bash
-cd generated/tests
+cd tests
 bash make-fixtures.sh    # 造 /tmp/cct/backend（文本 + 3 MB + 25 MB 假文件）
 bash fake-daemon.sh start   # 隔离实例：cmccyun-test + 端口 19896（不碰线上真挂载）
 bash functional.sh       # 跑 23 项功能测试
