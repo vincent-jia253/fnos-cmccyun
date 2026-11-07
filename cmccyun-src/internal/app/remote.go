@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/vincent-jia253/fnos-cmccyun/internal/api"
@@ -56,7 +57,84 @@ func (s *Service) childID(ctx context.Context, parentID, name string) string {
 	return ""
 }
 
+// splitCloudPath 把 /01影视/01求片/电影/华语电影 拆成路径段。
+//
+// STRM 映射里的"云端目录"是路径写法，但云盘接口只认 fileId，所以选目录时得把
+// 每一段依次列出来比对（见 resolveCloudPath）。支持首尾多余斜杠、连续斜杠，
+// 也支持只有一个 "/"（= 云盘根）。
+func splitCloudPath(p string) []string {
+	p = strings.TrimSpace(p)
+	if p == "" || p == "/" {
+		return nil
+	}
+	out := make([]string, 0, 6)
+	for _, seg := range strings.Split(p, "/") {
+		if seg = strings.TrimSpace(seg); seg != "" {
+			out = append(out, seg)
+		}
+	}
+	return out
+}
+
+// cloudSeg 是路径解析出来的一节（目录名 + fileId），目录选择器靠它画面包屑、
+// 也靠它一级级往回走（云盘接口只认 fileId，没有 parentId 可用）。
+type cloudSeg struct {
+	Name string `json:"name"`
+	ID   string `json:"id"`
+}
+
+// resolveCloudPath 顺着路径一段段列目录，返回最后一段的 fileId 与整条链。
+// 找不到时 missing 是断掉的那一段名字，chain 是断掉之前已经解析成功的部分。
+func (s *Service) resolveCloudPath(ctx context.Context, id, path string) (string, []cloudSeg, string, error) {
+	cur := ""
+	chain := make([]cloudSeg, 0, 6)
+	for _, seg := range splitCloudPath(path) {
+		files, err := s.remoteListOf(id, ctx, cur)
+		if err != nil {
+			return "", chain, seg, err
+		}
+		next := ""
+		for _, f := range files {
+			if !f.IsDir {
+				continue
+			}
+			if f.Name == seg {
+				next = f.ID
+				break
+			}
+			if next == "" && strings.EqualFold(f.Name, seg) {
+				next = f.ID // 大小写不同也认，云盘里确实有这种情况
+			}
+		}
+		if next == "" {
+			return "", chain, seg, nil
+		}
+		cur = next
+		chain = append(chain, cloudSeg{Name: seg, ID: next})
+	}
+	return cur, chain, "", nil
+}
+
 func (s *Service) registerRemoteRoutes(mux *http.ServeMux) {
+	// 把「路径写法」解析成 fileId：STRM 映射的目录选择器用它从当前值出发，
+	// 也用来校验手输的路径到底存不存在。
+	mux.HandleFunc("/api/remote/resolve", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+		defer cancel()
+		path := r.URL.Query().Get("path")
+		fileID, chain, missing, err := s.resolveCloudPath(ctx, accID(r), path)
+		if err != nil {
+			writeErr(w, err.Error())
+			return
+		}
+		// 注意：解析不到不算接口错误（ok 恒为 true），用 found 表达结果——
+		// 前端目录选择器要靠 chain 停到「最后一个存在的目录」上。
+		writeJSON(w, map[string]any{
+			"ok": true, "found": missing == "", "path": path, "id": fileID, "chain": chain,
+			"missing": missing, "segments": len(splitCloudPath(path)),
+		})
+	})
+
 	mux.HandleFunc("/api/remote/mkdir", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeErr(w, "请用 POST")

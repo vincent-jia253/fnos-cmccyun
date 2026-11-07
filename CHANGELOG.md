@@ -2,6 +2,17 @@
 
 版本号与应用内 `manifest` 的 `changelog` 字段保持一致；安装包在 [Releases](https://github.com/vincent-jia253/fnos-cmccyun/releases) 里。
 
+## v1.9.0
+
+STRM 映射的「云端目录」从手输改成点选：
+
+- 映射行的云端路径改为只读输入框 + 「选云端…」，点开就是云盘目录浏览器（逐级进入、面包屑、上一级/根目录），
+  选完自动填回；根目录 `/` 表示整盘。
+- 新增 `GET /api/remote/resolve?path=`：路径逐级解析成 `fileId`，返回目录链与「断在哪一段」；
+  解析不到时 `ok:true` + `found:false`，选择器停在最后一级存在的目录并提示。
+
+测试 130 → 134 项，`tests/strm-e2e.sh` 13 → 19 项。
+
 ## v1.8.2
 
 - 修 v1.8.1 总览的显示问题：没扫过的账号 `last_at` 为零值时间，序列化成 `0001-01-01T00:00:00Z`，

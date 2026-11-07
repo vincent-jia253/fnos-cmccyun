@@ -133,6 +133,35 @@ badk="${URL%%k=*}k=wrong"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$badk")
 [ "$code" = "403" ] && ok "口令错 → 403" || no "口令错应 403，实际 $code"
 
+echo "== 6b. 目录选择器用的路径解析（/api/remote/resolve） =="
+curl -s "$API/api/remote/resolve?path=%2F%E5%BD%B1%E8%A7%86%2F%E7%94%B5%E5%BD%B1" >"$ROOT/resolve_ok.json"
+python3 - "$ROOT/resolve_ok.json" >"$ROOT/resolve_ok_checks.txt" <<'RESOLVE'
+import json, sys
+d = json.load(open(sys.argv[1]))
+def chk(n, c): print(("PASS  " if c else "FAIL  ") + n)
+chk("存在的路径 found=true", d.get("found") is True)
+chk("解析出 fileId", bool(d.get("id")))
+chk("目录链两段（影视 → 电影）", [s.get("name") for s in (d.get("chain") or [])] == ["影视", "电影"])
+RESOLVE
+sed 's/^/  /' "$ROOT/resolve_ok_checks.txt"
+pc=$(grep -c '^PASS' "$ROOT/resolve_ok_checks.txt" || true); pc=${pc:-0}
+fc=$(grep -c '^FAIL' "$ROOT/resolve_ok_checks.txt" || true); fc=${fc:-0}
+pass=$((pass + pc)); fail=$((fail + fc))
+
+curl -s "$API/api/remote/resolve?path=%2F%E5%BD%B1%E8%A7%86%2F%E4%B8%8D%E5%AD%98%E5%9C%A8" >"$ROOT/resolve_bad.json"
+python3 - "$ROOT/resolve_bad.json" >"$ROOT/resolve_bad_checks.txt" <<'RESOLVEBAD'
+import json, sys
+d = json.load(open(sys.argv[1]))
+def chk(n, c): print(("PASS  " if c else "FAIL  ") + n)
+chk("不存在的路径 found=false（仍 200）", d.get("ok") is True and d.get("found") is False)
+chk("指出断在哪一段", d.get("missing") == "不存在")
+chk("链停在最后一个存在的目录", [s.get("name") for s in (d.get("chain") or [])] == ["影视"])
+RESOLVEBAD
+sed 's/^/  /' "$ROOT/resolve_bad_checks.txt"
+pc=$(grep -c '^PASS' "$ROOT/resolve_bad_checks.txt" || true); pc=${pc:-0}
+fc=$(grep -c '^FAIL' "$ROOT/resolve_bad_checks.txt" || true); fc=${fc:-0}
+pass=$((pass + pc)); fail=$((fail + fc))
+
 echo "== 7. 再扫一轮：内容没变就不该动文件 =="
 before=$(find "$ROOT/out" -name '*.strm' -printf '%T@ %p\n' | sort | md5sum | cut -d' ' -f1)
 sleep 1

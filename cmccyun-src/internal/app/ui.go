@@ -860,6 +860,22 @@ const indexHTML = `<!DOCTYPE html>
   </div>
 </div>
 
+<div id="cloudPickModal" class="modal" style="display:none">
+  <div class="box" style="width:640px;max-width:96vw">
+    <h3>选择云盘目录</h3>
+    <div class="sub">点目录进去逐级浏览；当前所在目录就是映射里的「云端目录」。根目录表示整盘。</div>
+    <div class="picker-head" id="cloudPickCur"><span id="cloudPickPath">/</span></div>
+    <div id="cloudPickList" style="max-height:44vh;overflow:auto;border:1px solid rgba(127,127,127,.22);border-radius:10px;padding:4px"></div>
+    <div class="foot">
+      <button id="cloudPickUp" class="sm ghost">上一级</button>
+      <button id="cloudPickRoot" class="sm ghost">根目录</button>
+      <span class="sel" id="cloudPickMsg"></span>
+      <button id="cloudPickOK" class="primary" style="margin-left:auto">选这个目录</button>
+      <button id="cloudPickCancel" class="sm ghost">取消</button>
+    </div>
+  </div>
+</div>
+
 <div id="toasts"></div>
 
 <script>
@@ -1256,16 +1272,97 @@ async function acctPost(body, btn, msg, okText) {
 /* ---------------- 影视 STRM ---------------- */
 var strmData = null;
 
+/* ---------------- 云盘目录选择器（STRM 映射用） ----------------
+   云盘接口只认 fileId，所以这里靠 /api/remote/list 逐级下钻，
+   靠 /api/remote/resolve 把已有映射的路径还原成「目录链」，
+   选完把 "/a/b/c" 写回映射的云端目录。 */
+var cloudPickCb = null, cloudPickChain = [], cloudPickID = "";
+
+function cloudPickMsg(text) { var n = $("cloudPickMsg"); if (n) n.textContent = text || ""; }
+
+function cloudPickPathText() {
+  var segs = cloudPickChain.map(function (x) { return x.name; });
+  return segs.length ? "/" + segs.join("/") : "/";
+}
+
+async function cloudPickLoad(id, chain) {
+  cloudPickID = id || "";
+  cloudPickChain = chain || [];
+  $("cloudPickPath").textContent = cloudPickPathText();
+  var box = $("cloudPickList");
+  box.innerHTML = '<div class="hint" style="padding:10px">加载中…</div>';
+  try {
+    var d = await api("/api/remote/list?dir=" + encodeURIComponent(cloudPickID), { timeout: 60000 });
+    var dirs = (d.entries || []).filter(function (e) { return e.is_dir; });
+    if (!dirs.length) {
+      box.innerHTML = '<div class="hint" style="padding:10px">（这里没有子目录，可以直接点「选这个目录」）</div>';
+      return;
+    }
+    box.innerHTML = dirs.map(function (e) {
+      return '<div class="qlink" style="display:block;padding:8px 10px;border-radius:8px" data-id="' + esc(e.id) + '" data-name="' + esc(e.name) + '">📁 ' + esc(e.name) + "</div>";
+    }).join("");
+  } catch (e) {
+    box.innerHTML = '<div class="hint" style="padding:10px;color:var(--err)">' + esc(e.message) + "</div>";
+  }
+}
+
+function openCloudPicker(cb, startPath) {
+  cloudPickCb = (typeof cb === "function") ? cb : null;
+  cloudPickMsg("");
+  $("cloudPickModal").style.display = "flex";
+  var start = (startPath || "").trim();
+  if (!start || start === "/") { cloudPickLoad("", []); return; }
+  api("/api/remote/resolve?path=" + encodeURIComponent(start), { timeout: 60000 }).then(function (d) {
+    var chain = d.chain || [];
+    cloudPickLoad(d.id || "", chain);
+    if (d.found === false) cloudPickMsg("「" + start + "」里有目录不存在（断在 " + (d.missing || "?") + "），已停在最后一级存在的目录");
+  }).catch(function (e) {
+    cloudPickMsg("按当前值打开失败：" + e.message);
+    cloudPickLoad("", []);
+  });
+}
+
+$("cloudPickList").onclick = function (ev) {
+  var row = ev.target.closest("[data-id]");
+  if (!row) return;
+  var chain = cloudPickChain.slice();
+  chain.push({ id: row.dataset.id, name: row.dataset.name });
+  cloudPickLoad(row.dataset.id, chain);
+};
+$("cloudPickUp").onclick = function () {
+  if (!cloudPickChain.length) return;
+  var chain = cloudPickChain.slice(0, -1);
+  var parent = chain.length ? chain[chain.length - 1].id : "";
+  cloudPickLoad(parent, chain);
+};
+$("cloudPickRoot").onclick = function () { cloudPickLoad("", []); };
+$("cloudPickCancel").onclick = function () { $("cloudPickModal").style.display = "none"; cloudPickCb = null; };
+$("cloudPickOK").onclick = function () {
+  var path = cloudPickPathText();
+  var cb = cloudPickCb;
+  $("cloudPickModal").style.display = "none";
+  cloudPickCb = null;
+  if (cb) cb(path);
+};
+
 function strmRow(p) {
   var d = document.createElement("div");
   d.className = "row nowrap";
   d.style.marginBottom = "8px";
   d.innerHTML =
-    '<input class="scloud" spellcheck="false" placeholder="/01影视" value="' + esc((p && p.cloud) || "") + '" style="flex:1 1 38%" />' +
+    '<input class="scloud" spellcheck="false" readonly placeholder="点「选云端…」浏览云盘目录" value="' + esc((p && p.cloud) || "") + '" style="flex:1 1 38%;cursor:pointer" title="点一下选择云盘目录" />' +
+    '<button class="sm scpick" style="flex:0 0 auto">选云端…</button>' +
     '<span class="hint" style="flex:0 0 auto;padding:0 2px">→</span>' +
     '<input class="slocal" spellcheck="false" placeholder="/vol1/media/strm" value="' + esc((p && p.local) || "") + '" style="flex:1 1 42%" />' +
     '<button class="sm spick" style="flex:0 0 auto">选本地…</button>' +
     '<button class="sm sdel" style="flex:0 0 auto">删</button>';
+  // 云端目录：输入框只读，点它或点「选云端…」都打开云盘目录选择器
+  var cloudInput = d.querySelector(".scloud");
+  var pickCloud = function () {
+    openCloudPicker(function (path) { cloudInput.value = path; });
+  };
+  cloudInput.onclick = pickCloud;
+  d.querySelector(".scpick").onclick = pickCloud;
   d.querySelector(".spick").onclick = function () {
     openPicker(function (path) { d.querySelector(".slocal").value = path; });
   };
