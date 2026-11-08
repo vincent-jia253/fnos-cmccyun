@@ -1622,11 +1622,13 @@ async function loadDavAccounts() {
       var name = esc(a.name || a.id) + (a.default ? ' <span class="tag">默认</span>' : "") + (isCur ? ' <span class="tag">当前</span>' : "");
       var ro = a.read_only ? '<span class="chip warn" style="padding:2px 8px">只读</span>' : '<span class="chip ok" style="padding:2px 8px">读写</span>';
       var pw = a.password_set ? '<span class="chip ok" style="padding:2px 8px">已设</span>' : '<span class="chip err" style="padding:2px 8px">未设</span>';
+      var unameCell = esc(a.user || "");
+      if (a.user_duplicated) unameCell += ' <span class="chip warn" style="padding:2px 8px" title="两台账号用了同一个 WebDAV 用户名，建议在下面「用户名」里改掉其中一台">重名</span>';
       var dl = a.redirect ? "302 到 CDN" : "本机代理";
       html += "<tr>" +
         "<td>" + name + '<div class="hint">' + esc(a.account || "") + "</div></td>" +
         '<td><code class="k">' + esc(a.url || a.path || "") + "</code></td>" +
-        "<td>" + esc(a.user || "") + "</td>" +
+        "<td>" + unameCell + "</td>" +
         "<td>" + pw + "</td>" +
         "<td>" + ro + "</td>" +
         "<td>" + dl + "</td>" +

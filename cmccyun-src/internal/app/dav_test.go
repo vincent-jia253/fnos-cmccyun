@@ -331,3 +331,62 @@ func TestDavPageShowsAccountScope(t *testing.T) {
 		}
 	}
 }
+
+// 新建账号要拿到不重名的 WebDAV 用户名（默认值以前一律 cmccyun，两台必撞）。
+func TestNewAccountsGetUniqueDAVUser(t *testing.T) {
+	s, root := newMountSvc(t, "")
+	first, err := s.AddAccount("一号", filepath.Join(root, "m1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.AddAccount("二号", filepath.Join(root, "m2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := s.Config()
+	a1, _ := cfg.AccountByID(first)
+	a2, _ := cfg.AccountByID(second)
+	if a1.DAVUser == "" || a2.DAVUser == "" {
+		t.Fatal("新账号应带默认 WebDAV 用户名")
+	}
+	if strings.EqualFold(a1.DAVUser, a2.DAVUser) {
+		t.Fatalf("两台账号的 WebDAV 用户名不能相同：%q / %q", a1.DAVUser, a2.DAVUser)
+	}
+	// 默认账号本来就占着 cmccyun，新账号应顺延到 cmccyun2 / cmccyun3
+	if a1.DAVUser != "cmccyun2" || a2.DAVUser != "cmccyun3" {
+		t.Errorf("期望 cmccyun2 / cmccyun3，得到 %q / %q", a1.DAVUser, a2.DAVUser)
+	}
+}
+
+// 总览要标出「用户名重复」的那几台，界面据此提示改名。
+func TestDAVAccountsViewFlagsDuplicateUser(t *testing.T) {
+	s, root := newMountSvc(t, "")
+	s.mu.Lock()
+	s.cfg.Accounts = []config.AccountConfig{
+		{ID: config.DefaultAccountID, MountPoint: filepath.Join(root, "m1"), DAVUser: "same", DAVPassword: "p1"},
+		{ID: "acc0123456789ab", MountPoint: filepath.Join(root, "m2"), DAVUser: "same", DAVPassword: "p2"},
+	}
+	snap := *s.cfg
+	s.mu.Unlock()
+	if err := config.Save(s.cfgPath, &snap); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range s.DAVAccountsView() {
+		if r["user_duplicated"] != true {
+			t.Errorf("两台同名，user_duplicated 应为 true：%v", r)
+		}
+	}
+	// 改掉一台之后就不再是同名
+	s.mu.Lock()
+	s.cfg.Accounts[1].DAVUser = "other"
+	snap2 := *s.cfg
+	s.mu.Unlock()
+	if err := config.Save(s.cfgPath, &snap2); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range s.DAVAccountsView() {
+		if r["user_duplicated"] != false {
+			t.Errorf("改名后不该再标重名：%v", r)
+		}
+	}
+}

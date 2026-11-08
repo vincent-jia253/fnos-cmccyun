@@ -2,6 +2,12 @@
 
 版本号与应用内 `manifest` 的 `changelog` 字段保持一致；安装包在 [Releases](https://github.com/vincent-jia253/fnos-cmccyun/releases) 里。
 
+## v2.1.2
+
+- 新建账号的 WebDAV 用户名自动顺延（cmccyun → cmccyun2 → …），不再两台撞同一个号。
+- 「全部账号的 WebDAV」总览对同名账号标「重名」提示（不改已有配置，用户自己决定改名）。
+- 测试 138 → 140 项。
+
 ## v2.1.1
 
 远程挂载（WebDAV）按账号分开显示：

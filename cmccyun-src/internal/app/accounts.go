@@ -50,6 +50,33 @@ func (s *Service) AccountsView() []map[string]any {
 	return out
 }
 
+// uniqueDAVUserLocked 给新账号挑一个不重名的 WebDAV 用户名。
+//
+// 默认值以前一律是 "cmccyun"，多账号下两台撞成同一个用户名，用户根本分不清
+// 「/dav/」和「/dav/<id>/」哪台该用哪个号。这里按 cmccyun / cmccyun2 / cmccyun3 …
+// 找第一个没被占用的。调用方必须已持有 s.mu。
+func (s *Service) uniqueDAVUserLocked(base string) string {
+	if base == "" {
+		base = config.DefaultDAVUser
+	}
+	taken := map[string]bool{}
+	for i := range s.cfg.Accounts {
+		if u := strings.TrimSpace(s.cfg.Accounts[i].DAVUser); u != "" {
+			taken[strings.ToLower(u)] = true
+		}
+	}
+	if !taken[strings.ToLower(base)] {
+		return base
+	}
+	for n := 2; n < 1000; n++ {
+		cand := fmt.Sprintf("%s%d", base, n)
+		if !taken[strings.ToLower(cand)] {
+			return cand
+		}
+	}
+	return base + "x"
+}
+
 // AddAccount 新增一台云盘账号，返回新账号的 ID。
 func (s *Service) AddAccount(name, mountPoint string) (string, error) {
 	name = strings.TrimSpace(name)
@@ -66,7 +93,7 @@ func (s *Service) AddAccount(name, mountPoint string) (string, error) {
 		ID:              config.NewAccountID(),
 		Name:            name,
 		MountPoint:      mountPoint,
-		DAVUser:         config.DefaultDAVUser,
+		DAVUser:         s.uniqueDAVUserLocked(config.DefaultDAVUser),
 		StrmMode:        "auto",
 		StrmIntervalMin: 5,
 	})

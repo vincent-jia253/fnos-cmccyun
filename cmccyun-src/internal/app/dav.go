@@ -294,6 +294,13 @@ func newDAVPassword() string {
 // 用户根本记不住第二台的地址和密码，所以单独给一份。
 func (s *Service) DAVAccountsView() []map[string]any {
 	cfg := s.Config()
+	// 先统计用户名出现次数：多账号沿用同一个默认用户名时，界面上要标出来。
+	count := map[string]int{}
+	for i := range cfg.Accounts {
+		if u := strings.ToLower(strings.TrimSpace(cfg.Accounts[i].DAVUser)); u != "" {
+			count[u]++
+		}
+	}
 	out := make([]map[string]any, 0, len(cfg.Accounts))
 	for i := range cfg.Accounts {
 		ac := &cfg.Accounts[i]
@@ -306,18 +313,19 @@ func (s *Service) DAVAccountsView() []map[string]any {
 			urls = append(urls, fmt.Sprintf("http://127.0.0.1:%d%s", cfg.WebPort, path))
 		}
 		out = append(out, map[string]any{
-			"id":           ac.ID,
-			"name":         ac.DisplayName(),
-			"account":      ac.Account,
-			"default":      ac.ID == cfg.DefaultAccount,
-			"path":         path,
-			"url":          urls[0],
-			"user":         ac.DAVUser,
-			"password_set": ac.DAVPassword != "",
-			"read_only":    ac.ReadOnly,
-			"redirect":     ac.DAVRedirectOn(),
-			"enabled":      cfg.DAVEnabled,
-			"mounted":      s.StatusOf(ac.ID).Mounted,
+			"id":              ac.ID,
+			"name":            ac.DisplayName(),
+			"account":         ac.Account,
+			"default":         ac.ID == cfg.DefaultAccount,
+			"path":            path,
+			"url":             urls[0],
+			"user":            ac.DAVUser,
+			"password_set":    ac.DAVPassword != "",
+			"read_only":       ac.ReadOnly,
+			"redirect":        ac.DAVRedirectOn(),
+			"enabled":         cfg.DAVEnabled,
+			"user_duplicated": count[strings.ToLower(strings.TrimSpace(ac.DAVUser))] > 1,
+			"mounted":         s.StatusOf(ac.ID).Mounted,
 		})
 	}
 	return out
