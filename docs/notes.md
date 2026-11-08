@@ -5,7 +5,7 @@
 换挂载点、切只读、看日志。
 
 - 应用名：`cmccyun`（显示名「移动云盘」）
-- 版本：**1.9.2**，平台 `all`（内置 linux/amd64 与 linux/arm64 两个二进制，CGO_ENABLED=0，无外部依赖）
+- 版本：**2.0.0**，平台 `all`（内置 linux/amd64 与 linux/arm64 两个二进制，CGO_ENABLED=0，无外部依赖）
 - 安装包：`./build.sh` 产出的 `cmccyun.fpk`（发布版见仓库 Releases，md5 记在对应的 Release 说明里）
 - 管理台端口：**19898**（`http://<NAS_IP>:19898/`）
 
@@ -36,6 +36,34 @@
    > （「授权」页会显示「上次自动续期 …」）。徽标在 >15 天时是正常色、<15 天变黄提示。
    > **实测（2026-10-12 真实账号）**：手动点「刷新令牌」→ 新到期 2026-11-11 00:40（整整 30.0 天），
    > 新令牌已写回 `config.json`，随后用新凭据列云端目录 / 真读文件都正常 —— 续期确实有效，30 天到期不会断。
+
+### v2.0.0 变更：移除扫码登录，授权改走「书签一键复制 / 手工粘贴」
+
+扫码登录在 139 侧一直不认我们生成的会话：v1.9.1 已把轮询请求体改成网页版真实形态
+（`{"account":"","dycPwd":<sID>,"type":5,"authLogin":true}`，AES 包 base64 当 body），
+并在生成二维码后立刻登记，但上游对「扫码」这一步始终固定回 `9999`（登录失败），
+没有手机端抓包就无法继续定位。按使用反馈直接**移除**，不留一个点不动的按钮。
+
+「授权」页现在是两条都实测可用的路：
+
+1. **书签一键复制**（推荐）：网页版把整条 `Authorization`（`base64("pc:账号:令牌")`）明文存在
+   `localStorage.authorization`；授权页里给出的 `javascript:` 书签只做「读出来 + 去掉 `Basic ` + 复制」，
+   在 139 页面点一下就进剪贴板，回来粘贴即可。实测读到 `Basic cGM6MTM0NzQwODk2MjE6…`，解开是 `pc:****9621:…`。
+2. **手工粘贴**：`Authorization: Basic xxx` 整行、只有 `Basic xxx`、带引号、被编辑器折行、中间带空格都认
+   （`normalizeAuthorization()` 统一收拾）。
+
+**手机号 + 验证码登录本版未提供**，原因写在下面，不糊弄：
+
+- 发码已打通：`POST /user/sms/getSmsCode`（明文 JSON `{phoneNumber, random, nationCode}`）实测**真的下发短信**，
+  返回 `{"success":true,"code":"0000","data":{"remainGetTimes":N,"mode":"0"}}`。
+- 校验打不通：`/user/sms/checkSmsCode` 要求 `{"encryptMsg": <加密体>, …}`，且 `verifyCode` 必须解在加密体里。
+  已试 15 种组合（AES-ECB / CBC × skey 三种形态 × 字段五种位置）全部回
+  `9103 短信验证码不能为空`（说明它读不到我们加密体里的字段）；带上 CookieJar 复现会话也一样。
+  缺一次**真实登录的请求样本**才能复原加密细节，所以不发布半成品。
+
+测试 135 → **128 项**（移除扫码相关 7 项），`functional.sh` 23/23、`strm-e2e.sh` 19/19、
+`multi-account-e2e.sh` 59/59、`console-auth-e2e.sh` 23/23、`auth-recovery-demo.sh` 9/9。
+依赖 `github.com/skip2/go-qrcode` 已移除。
 
 ### v1.9.2 变更：授权页加「书签取授权」，粘贴更宽容
 
@@ -705,7 +733,7 @@ GO=go VERSION=1.3.2 ./build.sh   # 需要 Go 1.24+ 与 fnpack
 | 脚本 | 作用 | 最近一次结果 |
 |---|---|---|
 | `functional.sh` | 对本地假后端跑端到端 FUSE 测试：读一致性（文本 / 3 MB / 25 MB）、10 次管道读、4 路并发读、Python `pread` 偏移扫描、写/改名/删除、12 MB 上传、30 MB 文件**局部改写**（校验暂存占用 <1 MB）、`ftruncate` 缩容 | **23 passed, 0 failed** |
-| `go test ./internal/...` | 单元测试：extents 区间合并、覆盖写入不整文件下载、截断语义、新建文件先 flush 后 write、令牌续期与形状回退、鉴权失败续期重试（含并发只续期一次、续期失败退避、新授权立即生效）、两处锁回归、**死锁看门狗（5 秒超时扫全部控制台入口 `Update(mount_point)` / `CheckMountPath` / `Status`…，超时即失败并打印 goroutine 栈）**、过期预签名地址重签、`vfs.Dead`（`ENOTCONN` 残留挂载识别）、**界面类名回归（`.sp` 只能当按钮里的加载指示器，不许当占位元素用）**、**「授权剩余天数」的悬停说明与可见文字解释必须存在（v1.3.2）**、**STRM 直链参数只拼一次（单问号）/ auto 模式挂载未就绪时跳过扫描且不记到点时间（v1.7.2）**、**挂载位置规则校验 / 非空目录确认 / 卷外与卷根拒绝 / 目录浏览与新建 / 切换位置后旧位置已卸载 / `mounted_at` 重启后可恢复 / 旧位置僵尸挂载自救 / 挂载点内部路径的识别与「先卸下再挪」/ 挂载点内禁止新建目录** | **135 tests, 全绿**（v1.9.2；`-race` 亦通过；FUSE 相关用例需 `CMCCYUN_TEST_FUSE=1`） |
+| `go test ./internal/...` | 单元测试：extents 区间合并、覆盖写入不整文件下载、截断语义、新建文件先 flush 后 write、令牌续期与形状回退、鉴权失败续期重试（含并发只续期一次、续期失败退避、新授权立即生效）、两处锁回归、**死锁看门狗（5 秒超时扫全部控制台入口 `Update(mount_point)` / `CheckMountPath` / `Status`…，超时即失败并打印 goroutine 栈）**、过期预签名地址重签、`vfs.Dead`（`ENOTCONN` 残留挂载识别）、**界面类名回归（`.sp` 只能当按钮里的加载指示器，不许当占位元素用）**、**「授权剩余天数」的悬停说明与可见文字解释必须存在（v1.3.2）**、**STRM 直链参数只拼一次（单问号）/ auto 模式挂载未就绪时跳过扫描且不记到点时间（v1.7.2）**、**挂载位置规则校验 / 非空目录确认 / 卷外与卷根拒绝 / 目录浏览与新建 / 切换位置后旧位置已卸载 / `mounted_at` 重启后可恢复 / 旧位置僵尸挂载自救 / 挂载点内部路径的识别与「先卸下再挪」/ 挂载点内禁止新建目录** | **128 tests, 全绿**（v2.0.0；`-race` 亦通过；FUSE 相关用例需 `CMCCYUN_TEST_FUSE=1`） |
 | `console-auth-e2e.sh` | **控制台访问密码端到端**：真守护进程 + 登录门开着，校验未登录时页面 302 到 `/login`、接口一律 401；默认 `admin/admin` 可登录并拿到 cookie；改密码时旧密码错/两次不一致被拒，改成功后旧 cookie 立刻失效、旧密码登不进、新密码可用；`config.json` 只存 `pbkdf2-sha256$…` 哈希（无明文）；`/dav/` 与 `/api/strm/play` 不被登录门拦 | **23 passed, 0 failed** |
 | `multi-account-e2e.sh` | **多账号端到端**：假后端上让**一个进程同时挂两棵 FUSE 树**（`mnt1` 读写 / `mnt2` 只读），校验两棵都在 `/proc/self/mountinfo`、目录列表与 `dd 64K` 都正常、只读是**分账号**的（只读那棵 `touch` 失败、读写那棵成功）、`/api/status` 一次报两台且 `read_only` 各自正确、`?account=<id>` 只描述那一台、**按账号看日志**（过滤后不含另一台的挂载点/STRM 输出）、**单账号扫描**（只打到那一台、last_at 落到该账号、没云端 client 时如实报错）、**WebDAV 凭据分账号**（`/dav/` 只认默认账号、`/dav/<id>/` 只认自己那台，串号/无凭据一律 401、`/dav/01影视/` 落回默认账号）、**全部重挂**逐台成功且两棵仍挂、**按账号导出**默认脱敏（`include_auth=1` 才带凭据、文件名带账号 ID）、删除第二台**只卸它自己**（`mnt1` 仍在且仍可读、`mounted_at` 清掉该账号、账号数回到 1） | **59 passed, 0 failed** |
 | `restart.sh` | 用假后端（`CMCCYUN_DEBUG_FAKE`）把守护进程挂在 `/tmp/cct/mnt`，管理台 19899 | ok |

@@ -2,6 +2,16 @@
 
 版本号与应用内 `manifest` 的 `changelog` 字段保持一致；安装包在 [Releases](https://github.com/vincent-jia253/fnos-cmccyun/releases) 里。
 
+## v2.0.0
+
+- **移除扫码登录**：139 侧始终不认我们生成的会话（请求体已与网页版逐字节一致，仍固定回 9999），
+  无手机端抓包无法继续；按反馈直接去掉，不留死按钮。
+- 授权页改为两条实测可用的路：**书签一键复制**（读 `localStorage.authorization`）
+  与**手工粘贴**（整行 / 带 `Basic ` / 折行 / 带空格都认）。
+- 手机号+验证码登录**未提供**：发码已打通（实测下发短信），校验要求 `encryptMsg` 加密体，
+  15 种组合均回 9103，需真实请求样本才能复原。
+- 移除 `github.com/skip2/go-qrcode` 依赖；测试 135 → 128 项。
+
 ## v1.9.2
 
 - 授权页新增「书签小程序取授权」：网页版把整条 Authorization 存在 `localStorage.authorization`，
