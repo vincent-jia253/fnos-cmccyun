@@ -2,6 +2,16 @@
 
 版本号与应用内 `manifest` 的 `changelog` 字段保持一致；安装包在 [Releases](https://github.com/vincent-jia253/fnos-cmccyun/releases) 里。
 
+## v2.1.1
+
+远程挂载（WebDAV）按账号分开显示：
+
+- WebDAV 页标题标出当前账号与路径，写明「总开关全局、路径/凭据按账号」。
+- 新增 `GET /api/dav/accounts` 与「全部账号的 WebDAV」总览：地址、用户名、密码是否已设、
+  只读/读写、下载方式，行内可「切到这台」「复制地址」；单账号时隐藏。
+
+测试 135 → 138 项，多账号 e2e 59 → 64 项。
+
 ## v2.1.0
 
 扫码登录按本机 `/vol4/@appcenter/yun139`（能用的 node 客户端）的实现重做并恢复：

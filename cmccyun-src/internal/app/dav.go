@@ -287,6 +287,42 @@ func newDAVPassword() string {
 
 // DAVInfo is what the console page shows: connection details plus a couple of
 // ready-to-paste examples.
+// DAVAccountsView 是「全部账号的 WebDAV」总览：每台一行，只给界面要显示的字段。
+//
+// WebDAV 的开关（DAVEnabled）是全局的，但路径 `/dav/` vs `/dav/<账号ID>/`、
+// 用户名、密码、只读、是否 302 到 CDN 都是**按账号**的；多账号时没有一个总表，
+// 用户根本记不住第二台的地址和密码，所以单独给一份。
+func (s *Service) DAVAccountsView() []map[string]any {
+	cfg := s.Config()
+	out := make([]map[string]any, 0, len(cfg.Accounts))
+	for i := range cfg.Accounts {
+		ac := &cfg.Accounts[i]
+		path := davPathFor(ac.ID)
+		urls := make([]string, 0, 4)
+		for _, host := range localIPv4() {
+			urls = append(urls, fmt.Sprintf("http://%s:%d%s", host, cfg.WebPort, path))
+		}
+		if len(urls) == 0 {
+			urls = append(urls, fmt.Sprintf("http://127.0.0.1:%d%s", cfg.WebPort, path))
+		}
+		out = append(out, map[string]any{
+			"id":           ac.ID,
+			"name":         ac.DisplayName(),
+			"account":      ac.Account,
+			"default":      ac.ID == cfg.DefaultAccount,
+			"path":         path,
+			"url":          urls[0],
+			"user":         ac.DAVUser,
+			"password_set": ac.DAVPassword != "",
+			"read_only":    ac.ReadOnly,
+			"redirect":     ac.DAVRedirectOn(),
+			"enabled":      cfg.DAVEnabled,
+			"mounted":      s.StatusOf(ac.ID).Mounted,
+		})
+	}
+	return out
+}
+
 func (s *Service) DAVInfo(id string) map[string]any {
 	cfg := s.Config()
 	ac, ok := cfg.AccountByID(id)
@@ -387,6 +423,11 @@ func (s *Service) SetDAV(id string, patch map[string]any) (map[string]any, error
 
 // registerDAVRoutes wires the console API for this page.
 func (s *Service) registerDAVRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/dav/accounts", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"ok": true, "accounts": s.DAVAccountsView(),
+			"enabled": s.Config().DAVEnabled})
+	})
+
 	mux.HandleFunc("/api/dav/info", func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Query().Get("account")
 		writeJSON(w, map[string]any{"ok": true, "dav": s.DAVInfo(id)})

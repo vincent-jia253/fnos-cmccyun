@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -220,5 +221,113 @@ func TestDAVTabInConsole(t *testing.T) {
 	}
 	if strings.Contains(indexHTML, "cdn.jsdelivr") || strings.Contains(indexHTML, "unpkg.com") {
 		t.Error("控制台不许引外网资源")
+	}
+}
+
+// WebDAV 总览：每台账号一行，路径/用户名/密码/只读各自独立，总开关是全局的。
+func TestDAVAccountsViewPerAccount(t *testing.T) {
+	s, root := newMountSvc(t, "")
+	s.mu.Lock()
+	s.cfg.DAVEnabled = true
+	s.cfg.Accounts = []config.AccountConfig{
+		{ID: config.DefaultAccountID, Name: "主号", Account: "****9621",
+			MountPoint: filepath.Join(root, "mnt1"), DAVUser: "cmccyun", DAVPassword: "pw-one"},
+		{ID: "acc0123456789ab", Name: "副号", Account: "****7261", ReadOnly: true,
+			MountPoint: filepath.Join(root, "mnt2"), DAVUser: "second", DAVPassword: "pw-two"},
+	}
+	s.cfg.DefaultAccount = config.DefaultAccountID
+	snap := *s.cfg
+	s.mu.Unlock()
+	if err := config.Save(s.cfgPath, &snap); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := s.DAVAccountsView()
+	if len(rows) != 2 {
+		t.Fatalf("应逐台返回，得到 %d 行", len(rows))
+	}
+	byID := map[string]map[string]any{}
+	for _, r := range rows {
+		byID[r["id"].(string)] = r
+	}
+	main, second := byID[config.DefaultAccountID], byID["acc0123456789ab"]
+	if main == nil || second == nil {
+		t.Fatalf("缺少账号行：%v", byID)
+	}
+	// 默认账号沿用老地址 /dav/，其余是 /dav/<id>/
+	if main["path"] != "/dav/" {
+		t.Errorf("默认账号路径应为 /dav/，得到 %v", main["path"])
+	}
+	if second["path"] != "/dav/acc0123456789ab/" {
+		t.Errorf("第二账号路径应为 /dav/acc0123456789ab/，得到 %v", second["path"])
+	}
+	if main["user"] != "cmccyun" || second["user"] != "second" {
+		t.Errorf("用户名应各自独立：%v / %v", main["user"], second["user"])
+	}
+	if main["password_set"] != true || second["password_set"] != true {
+		t.Error("两台都设了密码，password_set 应为 true")
+	}
+	if second["read_only"] != true || main["read_only"] != false {
+		t.Errorf("只读是分账号的：main=%v second=%v", main["read_only"], second["read_only"])
+	}
+	if main["enabled"] != true || second["enabled"] != true {
+		t.Error("总开关打开时两台都应显示已启用")
+	}
+	if u, _ := second["url"].(string); !strings.Contains(u, "/dav/acc0123456789ab/") {
+		t.Errorf("URL 应带账号路径，得到 %q", u)
+	}
+	// 关掉总开关：两台一起失效（这是全局的）
+	s.mu.Lock()
+	s.cfg.DAVEnabled = false
+	s.mu.Unlock()
+	for _, r := range s.DAVAccountsView() {
+		if r["enabled"] != false {
+			t.Errorf("关掉总开关后应全部 enabled=false：%v", r)
+		}
+	}
+}
+
+func TestDAVAccountsEndpoint(t *testing.T) {
+	s, root := newMountSvc(t, "")
+	s.mu.Lock()
+	s.cfg.Accounts = append(s.cfg.Accounts, config.AccountConfig{
+		ID: "acc0123456789ab", MountPoint: filepath.Join(root, "mnt2"), DAVUser: "u2", DAVPassword: "p2",
+	})
+	snap := *s.cfg
+	s.mu.Unlock()
+	if err := config.Save(s.cfgPath, &snap); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/dav/accounts", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 %d", rec.Code)
+	}
+	var body struct {
+		OK       bool             `json:"ok"`
+		Accounts []map[string]any `json:"accounts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.OK || len(body.Accounts) != 2 {
+		t.Fatalf("应返回两台，得到 ok=%v n=%d", body.OK, len(body.Accounts))
+	}
+}
+
+// 界面：标题要标明当前账号，并且有「全部账号的 WebDAV」总览表。
+func TestDavPageShowsAccountScope(t *testing.T) {
+	for _, want := range []string{
+		`id="davWho"`,
+		`id="davAllWrap"`,
+		`id="davAllBody"`,
+		`/api/dav/accounts`,
+		`data-dav-act="switch"`,
+		"总开关是全局的",
+		"按账号各一套",
+	} {
+		if !strings.Contains(indexHTML, want) {
+			t.Errorf("WebDAV 页缺 %q", want)
+		}
 	}
 }

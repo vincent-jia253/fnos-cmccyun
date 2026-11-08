@@ -634,7 +634,8 @@ const indexHTML = `<!DOCTYPE html>
       <div class="card">
         <div class="hd">
           <h2>远程挂载（WebDAV）</h2><span class="tag" id="davState">未启用</span>
-          <span class="sub">让飞牛「远程挂载」直接挂这块云盘，和「我的文件」里的挂载并列，用户自己选</span>
+          <span class="tag" id="davWho">—</span>
+          <span class="sub">让飞牛「远程挂载」直接挂这块云盘；<b>总开关是全局的</b>，路径 / 用户名 / 密码 / 只读<b>按账号各一套</b></span>
         </div>
         <div class="bd">
           <div class="checkline" style="height:34px">
@@ -666,6 +667,20 @@ const indexHTML = `<!DOCTYPE html>
             <button id="btnDavSave" class="primary">保存</button>
           </div>
           <div id="msgDav" class="msg"></div>
+
+          <!-- 多账号：WebDAV 的路径与凭据各一套，这里给一张总览（单账号时隐藏） -->
+          <div id="davAllWrap" style="display:none;margin-top:20px;padding-top:14px;border-top:1px solid rgba(127,127,127,.18)">
+            <div class="hd" style="margin-bottom:8px">
+              <h2 style="font-size:15px">全部账号的 WebDAV</h2>
+              <span class="sub">总开关是全局的；下面每台的地址、用户名、密码、只读各管各的</span>
+            </div>
+            <div class="scroll" style="max-height:none">
+              <table>
+                <thead><tr><th>账号</th><th>地址</th><th>用户名</th><th>密码</th><th>读写</th><th>下载</th><th style="text-align:right">操作</th></tr></thead>
+                <tbody id="davAllBody"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1573,12 +1588,76 @@ function davShow(d) {
     ? "多网卡：首选上面那条，其余是 " + extra
     : (urls.length ? "填这条就行（本机网卡的局域网地址）。" : "还没读到本机 IP。");
   $("davState").textContent = davData.enabled ? "已启用" : "未启用";
+  if ($("davWho")) {
+    var who = davData.url ? (davData.path || "") : "";
+    var uname = "";
+    for (var wi = 0; wi < accounts.length; wi++) {
+      if (accounts[wi].id === davData.account) uname = accounts[wi].name || accounts[wi].id;
+    }
+    $("davWho").textContent = uname ? ("账号 " + uname + " · " + (davData.path || "")) : "账号 —";
+    void who;
+  }
 }
 
 async function loadDav() {
   try { var d = await api("/api/dav/info"); davShow(d.dav); }
   catch (e) { say("msgDav", e.message, false); }
+  loadDavAccounts();
 }
+
+/* 全部账号的 WebDAV 总览：多账号才有意义，单账号收起 */
+async function loadDavAccounts() {
+  var wrap = $("davAllWrap"), body = $("davAllBody");
+  if (!wrap || !body) return;
+  if (accounts.length < 2) { wrap.style.display = "none"; return; }
+  wrap.style.display = "";
+  try {
+    var d = await api("/api/dav/accounts");
+    var rows = d.accounts || [];
+    if (!rows.length) { body.innerHTML = '<tr><td colspan="7" class="empty">还没有账号</td></tr>'; return; }
+    var html = "";
+    for (var i = 0; i < rows.length; i++) {
+      var a = rows[i];
+      var isCur = (a.id === curAccount) || (!curAccount && a.default);
+      var name = esc(a.name || a.id) + (a.default ? ' <span class="tag">默认</span>' : "") + (isCur ? ' <span class="tag">当前</span>' : "");
+      var ro = a.read_only ? '<span class="chip warn" style="padding:2px 8px">只读</span>' : '<span class="chip ok" style="padding:2px 8px">读写</span>';
+      var pw = a.password_set ? '<span class="chip ok" style="padding:2px 8px">已设</span>' : '<span class="chip err" style="padding:2px 8px">未设</span>';
+      var dl = a.redirect ? "302 到 CDN" : "本机代理";
+      html += "<tr>" +
+        "<td>" + name + '<div class="hint">' + esc(a.account || "") + "</div></td>" +
+        '<td><code class="k">' + esc(a.url || a.path || "") + "</code></td>" +
+        "<td>" + esc(a.user || "") + "</td>" +
+        "<td>" + pw + "</td>" +
+        "<td>" + ro + "</td>" +
+        "<td>" + dl + "</td>" +
+        '<td style="text-align:right;white-space:nowrap">' +
+          (isCur ? "" : '<button class="sm ghost" data-dav-act="switch" data-id="' + esc(a.id) + '">切到这台</button> ') +
+          '<button class="sm ghost" data-dav-act="copy" data-url="' + esc(a.url || "") + '" data-user="' + esc(a.user || "") + '">复制地址</button>' +
+        "</td></tr>";
+    }
+    body.innerHTML = html;
+  } catch (e) {
+    body.innerHTML = '<tr><td colspan="7" class="empty">' + esc(e.message) + "</td></tr>";
+  }
+}
+
+/* 总览里的快捷操作：切账号 / 复制地址+用户名 */
+(function () {
+  var body = $("davAllBody");
+  if (!body) return;
+  body.onclick = async function (ev) {
+    var t = ev.target;
+    while (t && t !== body && !(t.tagName === "BUTTON" && t.dataset && t.dataset.davAct)) t = t.parentNode;
+    if (!t || t === body) return;
+    if (t.dataset.davAct === "switch") { await selectAccount(t.dataset.id); showTab("dav"); return; }
+    if (t.dataset.davAct === "copy") {
+      var text = (t.dataset.url || "") + "\n用户名：" + (t.dataset.user || "");
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { toast("地址和用户名已复制", "ok"); }, function () { prompt("复制：", text); });
+      } else { prompt("复制：", text); }
+    }
+  };
+})();
 
 function davCopy(text, btn) {
   var done = function () {

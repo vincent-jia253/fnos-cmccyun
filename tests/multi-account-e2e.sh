@@ -266,6 +266,27 @@ pc=$(grep -c '^PASS' "$ROOT/strm_all_checks.txt" || true); pc=${pc:-0}
 fc=$(grep -c '^FAIL' "$ROOT/strm_all_checks.txt" || true); fc=${fc:-0}
 pass=$((pass + pc)); fail=$((fail + fc))
 
+echo "== 4h. 全部账号的 WebDAV 总览 =="
+curl -s "$API/api/dav/accounts" >"$ROOT/dav_all.json"
+python3 - "$ROOT/dav_all.json" "$ACC2" >"$ROOT/dav_all_checks.txt" <<'DAVCHK'
+import json, sys
+d = json.load(open(sys.argv[1])); acc2 = sys.argv[2]
+def chk(n, c): print(("PASS  " if c else "FAIL  ") + n)
+rows = d.get("accounts") or []
+by = {r.get("id"): r for r in rows}
+chk("总览返回两台", len(rows) == 2)
+chk("默认账号沿用 /dav/", by.get("default", {}).get("path") == "/dav/")
+chk("第二账号用自己的 /dav/<id>/", by.get(acc2, {}).get("path") == "/dav/" + acc2 + "/")
+chk("两台用户名各自独立", by.get("default", {}).get("user") == "u-one"
+    and by.get(acc2, {}).get("user") == "u-two")
+chk("每行都带密码/读写/下载三项", all(
+    ("password_set" in r and "read_only" in r and "redirect" in r) for r in rows))
+DAVCHK
+sed 's/^/  /' "$ROOT/dav_all_checks.txt"
+pc=$(grep -c '^PASS' "$ROOT/dav_all_checks.txt" || true); pc=${pc:-0}
+fc=$(grep -c '^FAIL' "$ROOT/dav_all_checks.txt" || true); fc=${fc:-0}
+pass=$((pass + pc)); fail=$((fail + fc))
+
 echo "== 5. 删除第二台：只卸它自己 =="
 curl -s -X POST "$API/api/accounts" -H 'Content-Type: application/json' \
      -d "{\"action\":\"delete\",\"id\":\"$ACC2\"}" >"$ROOT/del.json"
