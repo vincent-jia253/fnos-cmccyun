@@ -536,6 +536,26 @@ const indexHTML = `<!DOCTYPE html>
             <label>Authorization</label>
             <input id="f_auth" type="password" placeholder="留空表示不修改" autocomplete="off" spellcheck="false" />
           </div>
+          <div class="hint" style="margin:-4px 0 10px">
+            粘贴时不用挑格式：整行 <code class="k">Authorization: Basic xxxxx</code>、只有 <code class="k">Basic xxxxx</code>、
+            或直接那一长串 base64 都认；被编辑器折成几行也认（我们会去掉空白）。
+          </div>
+          <details style="margin:0 0 12px">
+            <summary style="cursor:pointer;font-size:13px">扫码扫不上？用下面的书签两步拿到授权</summary>
+            <ol class="hint" style="margin:8px 0 0 18px;line-height:1.9">
+              <li>在这台电脑的浏览器里登录 <a href="https://yun.139.com/w/" target="_blank" rel="noreferrer">yun.139.com</a>（要授权的那个账号，手机上「我的 → 账号」能看到是哪个）。</li>
+              <li>把下面这段存成书签，在 139 页面上点一下（或在地址栏粘一次后回车）：它会从浏览器本地把整条 Authorization 复制走。</li>
+              <li>回到本页，粘进上面的 Authorization 框 → 「保存授权」。</li>
+            </ol>
+            <div class="row" style="margin-top:8px;align-items:flex-start">
+              <code id="bmCode" class="k" style="flex:1 1 auto;word-break:break-all;font-size:11px;line-height:1.7">javascript:(function(){var a=localStorage.getItem("authorization")||"";if(!a){alert("没找到授权：请先在这个浏览器里登录 yun.139.com");return;}var b=a.replace(/^Authorization:\s*/i,"").replace(/^Basic\s+/i,"").trim();function done(){alert("已复制 "+b.length+" 个字符，回到 cmccyun 控制台「授权」页粘贴即可");}if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(b).then(done,function(){prompt("复制这段 Authorization：",b);});}else{prompt("复制这段 Authorization：",b);}})()</code>
+              <button id="btnCopyBm" class="sm" style="flex:0 0 auto">复制代码</button>
+            </div>
+            <div class="hint" style="margin-top:6px">
+              原理：网页版把整条 <code class="k">Authorization</code>（<code class="k">base64("pc:账号:令牌")</code>）明文存在
+              <code class="k">localStorage.authorization</code> 里，这段小程序只做「读出来 + 去掉 Basic 前缀 + 复制」，不外发任何数据。
+            </div>
+          </details>
           <div class="actions">
             <button id="btnSaveAuth" class="primary">保存授权</button>
             <button id="btnRefreshAuth" title="立即向云盘服务端续期一次：成功后续期天数回到约 30 天，并把新授权写回配置">刷新令牌</button>
@@ -1873,6 +1893,18 @@ $("btnQrStart").onclick = function () { qrStart(); };
 $("btnQrStop").onclick = function () { qrHalt("已停止，重新生成可以再来一次"); qrSetImage(false); };
 
 /* ---------------- 授权 ---------------- */
+(function () {
+  var btn = $("btnCopyBm");
+  if (!btn) return;
+  btn.onclick = function () {
+    var code = ($("bmCode") && $("bmCode").textContent || "").trim();
+    var ok = function () { toast("书签代码已复制：存成书签后在 139 页面点一下", "ok"); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(code).then(ok, function () { prompt("复制这段书签代码：", code); });
+    } else { prompt("复制这段书签代码：", code); }
+  };
+})();
+
 $("btnSaveAuth").onclick = async function () {
   var v = $("f_auth").value.trim();
   if (!v) { say("msgAuth", "请输入 Authorization", false); return; }

@@ -2,6 +2,15 @@
 
 版本号与应用内 `manifest` 的 `changelog` 字段保持一致；安装包在 [Releases](https://github.com/vincent-jia253/fnos-cmccyun/releases) 里。
 
+## v1.9.2
+
+- 授权页新增「书签小程序取授权」：网页版把整条 Authorization 存在 `localStorage.authorization`，
+  一键复制后粘进控制台即可，无需 F12、无需扫码。
+- `normalizeAuthorization()`：整行 / 带 `Basic ` / 带引号 / 折行 / 带空格都能收拾成裸 base64。
+- 扫码链路现状：请求体已与网页版逐字节一致，上游仍回 9999，需手机端抓包继续定位。
+
+测试 131 → 135 项。
+
 ## v1.9.1
 
 修扫码登录「扫一下就提示二维码已失效」：

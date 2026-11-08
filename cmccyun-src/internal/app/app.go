@@ -422,6 +422,24 @@ func (s *Service) Update(patch map[string]any) error { return s.UpdateOf("", pat
 
 // UpdateOf applies a patch. Global keys (权限位、缓存、端口…) 改全局；账号相关的
 // 键（authorization / mount_point / read_only / strm_*）改指定账号。
+// normalizeAuthorization 收拾用户从浏览器抄来的 Authorization。
+//
+// 实际粘贴姿势五花八门：带 `Authorization:` 前缀、带 `Basic `、被编辑器折成多行、
+// 前后带引号。统一去掉这些外壳，剩下的必须是 base64("pc:账号:令牌")；收拾不干净
+// 的话 api.New 只会抛一句看不懂的错，不如在入口就说明白。
+func normalizeAuthorization(raw string) string {
+	v := strings.TrimSpace(raw)
+	if strings.HasPrefix(strings.ToLower(v), "authorization:") {
+		v = strings.TrimSpace(v[len("authorization:"):])
+	}
+	if len(v) >= 6 && strings.EqualFold(v[:6], "basic ") {
+		v = strings.TrimSpace(v[6:])
+	}
+	v = strings.Trim(v, "\"'")
+	v = strings.Join(strings.Fields(v), "")
+	return v
+}
+
 func (s *Service) UpdateOf(id string, patch map[string]any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -431,10 +449,8 @@ func (s *Service) UpdateOf(id string, patch map[string]any) error {
 		return err
 	}
 	if v, ok := patch["authorization"].(string); ok {
-		v = strings.TrimSpace(v)
+		v = normalizeAuthorization(v)
 		if v != "" {
-			v = strings.TrimPrefix(v, "Basic ")
-			v = strings.TrimSpace(v)
 			c, err := api.New(v)
 			if err != nil {
 				return err
