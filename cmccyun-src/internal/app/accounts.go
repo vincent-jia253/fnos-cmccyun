@@ -93,7 +93,8 @@ func (s *Service) AddAccount(name, mountPoint string) (string, error) {
 		ID:              config.NewAccountID(),
 		Name:            name,
 		MountPoint:      mountPoint,
-		DAVUser:         s.uniqueDAVUserLocked(config.DefaultDAVUser),
+		DAVUser:         s.uniqueDAVUserLocked(newDAVUser()),
+		DAVPassword:     newDAVPassword(),
 		StrmMode:        "auto",
 		StrmIntervalMin: 5,
 	})

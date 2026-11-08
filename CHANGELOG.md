@@ -2,6 +2,15 @@
 
 版本号与应用内 `manifest` 的 `changelog` 字段保持一致；安装包在 [Releases](https://github.com/vincent-jia253/fnos-cmccyun/releases) 里。
 
+## v2.2.0
+
+- 新建账号的 WebDAV 凭据改为完全随机：用户名 8 位、密码 16 位（crypto/rand，去掉 0/O/1/l/I）。
+- 手改用户名重名 → 接口拒绝；留空 → 自动生成 8 位随机。
+- 新增 `POST /api/dav/reset`：单台重置 / `fix_duplicates` 一键修掉重名（幂等，唯一账号不动）。
+- 界面：用户名密码只读 + 「随机生成」；总览有重名时出现「一键修掉重名」，每行可「重置」。
+
+测试 140 → 146 项，多账号 e2e 64 → 76 项。
+
 ## v2.1.2
 
 - 新建账号的 WebDAV 用户名自动顺延（cmccyun → cmccyun2 → …），不再两台撞同一个号。

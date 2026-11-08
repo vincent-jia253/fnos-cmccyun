@@ -643,12 +643,12 @@ const indexHTML = `<!DOCTYPE html>
             <span>启用 WebDAV 服务（地址 <code class="k">/dav/</code>，账号密码独立于登录授权）</span>
           </div>
           <div class="grid" style="margin-top:12px">
-            <div><label>用户名</label><input id="davUser" spellcheck="false" /></div>
+            <div><label>用户名（8 位随机，只读）</label><input id="davUser" spellcheck="false" readonly title="点「随机生成」换一组" /></div>
             <div>
-              <label>密码</label>
+              <label>密码（16 位随机，只读）</label>
               <div class="row nowrap">
-                <input id="davPass" spellcheck="false" />
-                <button id="btnDavReset" style="flex:0 0 auto">重置</button>
+                <input id="davPass" spellcheck="false" readonly title="点「随机生成」换一组" />
+                <button id="btnDavReset" style="flex:0 0 auto" title="重新生成 8 位用户名 + 16 位密码">随机生成</button>
               </div>
             </div>
           </div>
@@ -672,7 +672,8 @@ const indexHTML = `<!DOCTYPE html>
           <div id="davAllWrap" style="display:none;margin-top:20px;padding-top:14px;border-top:1px solid rgba(127,127,127,.18)">
             <div class="hd" style="margin-bottom:8px">
               <h2 style="font-size:15px">全部账号的 WebDAV</h2>
-              <span class="sub">总开关是全局的；下面每台的地址、用户名、密码、只读各管各的</span>
+              <span class="sub">总开关是全局的；下面每台的地址、用户名（8 位随机）、密码（16 位随机）、只读各管各的</span>
+              <button id="btnDavFixDup" class="sm" style="margin-left:auto;display:none" title="把用户名重复或为空的账号一次性换成随机用户名">一键修掉重名</button>
             </div>
             <div class="scroll" style="max-height:none">
               <table>
@@ -1634,10 +1635,14 @@ async function loadDavAccounts() {
         "<td>" + dl + "</td>" +
         '<td style="text-align:right;white-space:nowrap">' +
           (isCur ? "" : '<button class="sm ghost" data-dav-act="switch" data-id="' + esc(a.id) + '">切到这台</button> ') +
+          '<button class="sm ghost" data-dav-act="reset" data-id="' + esc(a.id) + '" title="重新生成这台的 8 位用户名 + 16 位密码">重置</button> ' +
           '<button class="sm ghost" data-dav-act="copy" data-url="' + esc(a.url || "") + '" data-user="' + esc(a.user || "") + '">复制地址</button>' +
         "</td></tr>";
     }
     body.innerHTML = html;
+    var dup = rows.some(function (r) { return r.user_duplicated; });
+    var fixBtn = $("btnDavFixDup");
+    if (fixBtn) fixBtn.style.display = dup ? "" : "none";
   } catch (e) {
     body.innerHTML = '<tr><td colspan="7" class="empty">' + esc(e.message) + "</td></tr>";
   }
@@ -1652,6 +1657,17 @@ async function loadDavAccounts() {
     while (t && t !== body && !(t.tagName === "BUTTON" && t.dataset && t.dataset.davAct)) t = t.parentNode;
     if (!t || t === body) return;
     if (t.dataset.davAct === "switch") { await selectAccount(t.dataset.id); showTab("dav"); return; }
+    if (t.dataset.davAct === "reset") {
+      if (!confirm("给这台重新生成一组账号密码？\n\n用户名 8 位、密码 16 位，全随机；已经连上的客户端要改成新的才能继续用。")) return;
+      busy(t, true, "生成中…");
+      try {
+        var r = await api("/api/dav/reset", { method: "POST", body: JSON.stringify({ id: t.dataset.id }) });
+        toast("已生成新的账号密码", "ok");
+        loadDav();
+      } catch (e) { toast(e.message, "err"); }
+      finally { busy(t, false); }
+      return;
+    }
     if (t.dataset.davAct === "copy") {
       var text = (t.dataset.url || "") + "\n用户名：" + (t.dataset.user || "");
       if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -1704,9 +1720,29 @@ async function davSave(patch, btn, okText) {
 }
 
 $("btnDavSave").onclick = function () { davSave(null, this); };
-$("btnDavReset").onclick = function () {
-  if (!confirm("重置密码后，飞牛里已经挂着的连接会失效，需要重新填一次。确定重置？")) return;
-  davSave({ regenerate: true }, this, "密码已重置，请重新填进飞牛");
+var fixDupBtn = $("btnDavFixDup");
+if (fixDupBtn) fixDupBtn.onclick = async function () {
+  if (!confirm("把用户名重复（或为空）的账号一次性换成 8 位随机用户名？\n\n已经唯一的账号不动；换过之后，连这些账号的客户端要改用户名才能继续用。")) return;
+  busy(this, true, "处理中…");
+  try {
+    var r = await api("/api/dav/reset", { method: "POST", body: JSON.stringify({ fix_duplicates: true }) });
+    var n = (r.changed || []).length;
+    toast(n ? ("已改掉 " + n + " 台的重复用户名") : "没有需要改的账号", "ok");
+    loadDav();
+  } catch (e) { toast(e.message, "err"); }
+  finally { busy(this, false); }
+};
+
+$("btnDavReset").onclick = async function () {
+  if (!confirm("随机生成一组新的账号密码？\n\n用户名 8 位、密码 16 位，完全随机；换完之后飞牛/其它客户端里已连的要改成新的才能继续用。")) return;
+  busy(this, true, "生成中…");
+  try {
+    var r = await api("/api/dav/reset", { method: "POST", body: JSON.stringify({ id: curAccount }) });
+    if (r.dav) davShow(r.dav);
+    toast("已生成新的账号密码", "ok");
+    loadDav();
+  } catch (e) { toast(e.message, "err"); }
+  finally { busy(this, false); }
 };
 $("btnDavCopy").onclick = function () { davCopy($("davURL").value, this); };
 $("btnDavCopyAuth").onclick = function () {

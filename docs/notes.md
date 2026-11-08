@@ -5,7 +5,7 @@
 换挂载点、切只读、看日志。
 
 - 应用名：`cmccyun`（显示名「移动云盘」）
-- 版本：**2.1.2**，平台 `all`（内置 linux/amd64 与 linux/arm64 两个二进制，CGO_ENABLED=0，无外部依赖）
+- 版本：**2.2.0**，平台 `all`（内置 linux/amd64 与 linux/arm64 两个二进制，CGO_ENABLED=0，无外部依赖）
 - 安装包：`./build.sh` 产出的 `cmccyun.fpk`（发布版见仓库 Releases，md5 记在对应的 Release 说明里）
 - 管理台端口：**19898**（`http://<NAS_IP>:19898/`）
 
@@ -36,6 +36,21 @@
    > （「授权」页会显示「上次自动续期 …」）。徽标在 >15 天时是正常色、<15 天变黄提示。
    > **实测（2026-10-12 真实账号）**：手动点「刷新令牌」→ 新到期 2026-11-11 00:40（整整 30.0 天），
    > 新令牌已写回 `config.json`，随后用新凭据列云端目录 / 真读文件都正常 —— 续期确实有效，30 天到期不会断。
+
+### v2.2.0 变更：WebDAV 账号密码完全随机 + 重名一键修掉
+
+- **新建账号就是随机凭据**：用户名 **8 位**、密码 **16 位**，`crypto/rand` 生成，字母表去掉了
+  `0/O/1/l/I`（抄下来容易看错的字符）。以前的默认用户名是 `cmccyun`，多账号必撞。
+- **重名直接被拒**：手改用户名时如果和别的账号重复，接口返回「已经被另一台账号用了」；留空则自动生成 8 位随机。
+- **一键修掉重名**：`POST /api/dav/reset {"fix_duplicates":true}` —— 把所有「用户名重复或为空」的账号
+  一次性换成随机用户名（已经唯一的账号不动，重复调用幂等）。界面上在「全部账号的 WebDAV」有重名时
+  会出现这个按钮；每行还有「重置」，单台换一组。
+- 界面上用户名/密码两栏改为**只读** + 「随机生成」按钮，避免手输弱密码；页面上仍可一键复制地址与账号密码。
+
+测试 140 → **146 项**（`TestRandomDAVCredentials` 200 次随机性 + 长度 + 易混淆字符、
+`TestNewAccountHasRandomDavCredentials`、`TestSetDAVRejectsDuplicateUser`、`TestResetDAVCredentials`、
+`TestFixDuplicateDAVUsers` 幂等、`TestDavRandomCredsUIPresent`），
+`tests/multi-account-e2e.sh` 64 → **76 项**（新增 12 项，含「新凭据能过 WebDAV 鉴权、旧凭据 401」）。
 
 ### v2.1.2 变更：多账号的 WebDAV 用户名不再撞车
 
@@ -782,9 +797,9 @@ GO=go VERSION=1.3.2 ./build.sh   # 需要 Go 1.24+ 与 fnpack
 | 脚本 | 作用 | 最近一次结果 |
 |---|---|---|
 | `functional.sh` | 对本地假后端跑端到端 FUSE 测试：读一致性（文本 / 3 MB / 25 MB）、10 次管道读、4 路并发读、Python `pread` 偏移扫描、写/改名/删除、12 MB 上传、30 MB 文件**局部改写**（校验暂存占用 <1 MB）、`ftruncate` 缩容 | **23 passed, 0 failed** |
-| `go test ./internal/...` | 单元测试：extents 区间合并、覆盖写入不整文件下载、截断语义、新建文件先 flush 后 write、令牌续期与形状回退、鉴权失败续期重试（含并发只续期一次、续期失败退避、新授权立即生效）、两处锁回归、**死锁看门狗（5 秒超时扫全部控制台入口 `Update(mount_point)` / `CheckMountPath` / `Status`…，超时即失败并打印 goroutine 栈）**、过期预签名地址重签、`vfs.Dead`（`ENOTCONN` 残留挂载识别）、**界面类名回归（`.sp` 只能当按钮里的加载指示器，不许当占位元素用）**、**「授权剩余天数」的悬停说明与可见文字解释必须存在（v1.3.2）**、**STRM 直链参数只拼一次（单问号）/ auto 模式挂载未就绪时跳过扫描且不记到点时间（v1.7.2）**、**挂载位置规则校验 / 非空目录确认 / 卷外与卷根拒绝 / 目录浏览与新建 / 切换位置后旧位置已卸载 / `mounted_at` 重启后可恢复 / 旧位置僵尸挂载自救 / 挂载点内部路径的识别与「先卸下再挪」/ 挂载点内禁止新建目录** | **140 tests, 全绿**（v2.1.2；`-race` 亦通过；FUSE 相关用例需 `CMCCYUN_TEST_FUSE=1`） |
+| `go test ./internal/...` | 单元测试：extents 区间合并、覆盖写入不整文件下载、截断语义、新建文件先 flush 后 write、令牌续期与形状回退、鉴权失败续期重试（含并发只续期一次、续期失败退避、新授权立即生效）、两处锁回归、**死锁看门狗（5 秒超时扫全部控制台入口 `Update(mount_point)` / `CheckMountPath` / `Status`…，超时即失败并打印 goroutine 栈）**、过期预签名地址重签、`vfs.Dead`（`ENOTCONN` 残留挂载识别）、**界面类名回归（`.sp` 只能当按钮里的加载指示器，不许当占位元素用）**、**「授权剩余天数」的悬停说明与可见文字解释必须存在（v1.3.2）**、**STRM 直链参数只拼一次（单问号）/ auto 模式挂载未就绪时跳过扫描且不记到点时间（v1.7.2）**、**挂载位置规则校验 / 非空目录确认 / 卷外与卷根拒绝 / 目录浏览与新建 / 切换位置后旧位置已卸载 / `mounted_at` 重启后可恢复 / 旧位置僵尸挂载自救 / 挂载点内部路径的识别与「先卸下再挪」/ 挂载点内禁止新建目录** | **146 tests, 全绿**（v2.2.0；`-race` 亦通过；FUSE 相关用例需 `CMCCYUN_TEST_FUSE=1`） |
 | `console-auth-e2e.sh` | **控制台访问密码端到端**：真守护进程 + 登录门开着，校验未登录时页面 302 到 `/login`、接口一律 401；默认 `admin/admin` 可登录并拿到 cookie；改密码时旧密码错/两次不一致被拒，改成功后旧 cookie 立刻失效、旧密码登不进、新密码可用；`config.json` 只存 `pbkdf2-sha256$…` 哈希（无明文）；`/dav/` 与 `/api/strm/play` 不被登录门拦 | **23 passed, 0 failed** |
-| `multi-account-e2e.sh` | **多账号端到端**：假后端上让**一个进程同时挂两棵 FUSE 树**（`mnt1` 读写 / `mnt2` 只读），校验两棵都在 `/proc/self/mountinfo`、目录列表与 `dd 64K` 都正常、只读是**分账号**的（只读那棵 `touch` 失败、读写那棵成功）、`/api/status` 一次报两台且 `read_only` 各自正确、`?account=<id>` 只描述那一台、**按账号看日志**（过滤后不含另一台的挂载点/STRM 输出）、**单账号扫描**（只打到那一台、last_at 落到该账号、没云端 client 时如实报错）、**WebDAV 凭据分账号**（`/dav/` 只认默认账号、`/dav/<id>/` 只认自己那台，串号/无凭据一律 401、`/dav/01影视/` 落回默认账号）、**全部重挂**逐台成功且两棵仍挂、**按账号导出**默认脱敏（`include_auth=1` 才带凭据、文件名带账号 ID）、删除第二台**只卸它自己**（`mnt1` 仍在且仍可读、`mounted_at` 清掉该账号、账号数回到 1） | **64 passed, 0 failed** |
+| `multi-account-e2e.sh` | **多账号端到端**：假后端上让**一个进程同时挂两棵 FUSE 树**（`mnt1` 读写 / `mnt2` 只读），校验两棵都在 `/proc/self/mountinfo`、目录列表与 `dd 64K` 都正常、只读是**分账号**的（只读那棵 `touch` 失败、读写那棵成功）、`/api/status` 一次报两台且 `read_only` 各自正确、`?account=<id>` 只描述那一台、**按账号看日志**（过滤后不含另一台的挂载点/STRM 输出）、**单账号扫描**（只打到那一台、last_at 落到该账号、没云端 client 时如实报错）、**WebDAV 凭据分账号**（`/dav/` 只认默认账号、`/dav/<id>/` 只认自己那台，串号/无凭据一律 401、`/dav/01影视/` 落回默认账号）、**全部重挂**逐台成功且两棵仍挂、**按账号导出**默认脱敏（`include_auth=1` 才带凭据、文件名带账号 ID）、删除第二台**只卸它自己**（`mnt1` 仍在且仍可读、`mounted_at` 清掉该账号、账号数回到 1） | **76 passed, 0 failed** |
 | `restart.sh` | 用假后端（`CMCCYUN_DEBUG_FAKE`）把守护进程挂在 `/tmp/cct/mnt`，管理台 19899 | ok |
 | `fnos-lifecycle.sh` | 在真机上验证 fnOS 生命周期：status 3 → start → status 0 → 挂载可见 → 跨用户读/写 → 幂等 start → stop → 0 残留挂载 | 全部通过 |
 | `fnos-fuse-check.sh` | 检查真实挂载点：`allow_other`、mount↔后端 `md5` 一致、root 与普通用户都能读写 | 通过 |

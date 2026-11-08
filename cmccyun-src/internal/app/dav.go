@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -276,14 +277,30 @@ func basicAuthOK(r *http.Request, user, pass string) bool {
 }
 
 // newDAVPassword 生成 16 位 URL 安全随机密码（96 bit）。
-func newDAVPassword() string {
-	b := make([]byte, 12)
-	if _, err := rand.Read(b); err != nil {
-		// crypto/rand 失败时退回时间戳，别让开关打不开。
-		return fmt.Sprintf("cmcc%d", time.Now().UnixNano())
+// davAlphabet 去掉了 0/O/1/l/I 这些抄下来会看错的字符；55 个字符够随机了。
+const davAlphabet = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789"
+
+// randToken 生成 n 位随机串（crypto/rand，无模偏）。
+func randToken(n int) string {
+	out := make([]byte, n)
+	limit := big.NewInt(int64(len(davAlphabet)))
+	for i := range out {
+		idx, err := rand.Int(rand.Reader, limit)
+		if err != nil {
+			b := make([]byte, n)
+			_, _ = rand.Read(b)
+			return base64.RawURLEncoding.EncodeToString(b)[:n]
+		}
+		out[i] = davAlphabet[idx.Int64()]
 	}
-	return base64.RawURLEncoding.EncodeToString(b)
+	return string(out)
 }
+
+// newDAVUser 是 8 位随机 WebDAV 用户名（不再用可读的 cmccyun 式默认值）。
+func newDAVUser() string { return randToken(8) }
+
+// newDAVPassword 是 16 位随机密码。
+func newDAVPassword() string { return randToken(16) }
 
 // DAVInfo is what the console page shows: connection details plus a couple of
 // ready-to-paste examples.
@@ -364,6 +381,87 @@ func (s *Service) DAVInfo(id string) map[string]any {
 
 // SetDAV applies a patch from the console: enable/disable, rename, reset the
 // password, toggle redirect. Enabling without a password generates one.
+
+// davUserTakenLocked 判断某个 WebDAV 用户名是否已被「别的」账号占用（忽略大小写）。
+func (s *Service) davUserTakenLocked(user, exceptID string) bool {
+	user = strings.ToLower(strings.TrimSpace(user))
+	if user == "" {
+		return false
+	}
+	for i := range s.cfg.Accounts {
+		o := &s.cfg.Accounts[i]
+		if o.ID == exceptID {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(o.DAVUser)) == user {
+			return true
+		}
+	}
+	return false
+}
+
+// ResetDAVCredentials 给指定账号重新生成「8 位随机用户名 + 16 位随机密码」。
+func (s *Service) ResetDAVCredentials(id string) (map[string]any, error) {
+	s.mu.Lock()
+	ac, ok := s.cfg.AccountByID(id)
+	if !ok {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("账号不存在：%s", id)
+	}
+	ac.DAVUser = s.uniqueDAVUserLocked(newDAVUser())
+	ac.DAVPassword = newDAVPassword()
+	name, user := ac.DisplayName(), ac.DAVUser
+	snapshot := *s.cfg
+	s.mu.Unlock()
+	if err := config.Save(s.cfgPath, &snapshot); err != nil {
+		return nil, err
+	}
+	s.logf("WebDAV：账号「%s」换了一组随机账号密码（用户名 %s）", name, user)
+	return s.DAVInfo(id), nil
+}
+
+// FixDuplicateDAVUsers 把「用户名重复或为空」的账号一次性换成随机用户名。
+//
+// 历史上新建账号的默认用户名都是 cmccyun，多账号下必然撞车；这就是界面上
+// 「一键修掉重名」按钮的实现。已经唯一的账号一律不动（不打扰用户已配好的客户端）。
+func (s *Service) FixDuplicateDAVUsers() ([]map[string]any, error) {
+	s.mu.Lock()
+	count := map[string]int{}
+	for i := range s.cfg.Accounts {
+		u := strings.ToLower(strings.TrimSpace(s.cfg.Accounts[i].DAVUser))
+		if u != "" {
+			count[u]++
+		}
+	}
+	changed := make([]map[string]any, 0, len(s.cfg.Accounts))
+	for i := range s.cfg.Accounts {
+		ac := &s.cfg.Accounts[i]
+		u := strings.ToLower(strings.TrimSpace(ac.DAVUser))
+		if u != "" && count[u] == 1 {
+			continue
+		}
+		ac.DAVUser = s.uniqueDAVUserLocked(newDAVUser())
+		if ac.DAVPassword == "" {
+			ac.DAVPassword = newDAVPassword()
+		}
+		changed = append(changed, map[string]any{
+			"id": ac.ID, "name": ac.DisplayName(), "user": ac.DAVUser,
+		})
+	}
+	snapshot := *s.cfg
+	s.mu.Unlock()
+	if len(changed) == 0 {
+		return changed, nil
+	}
+	if err := config.Save(s.cfgPath, &snapshot); err != nil {
+		return nil, err
+	}
+	for _, c := range changed {
+		s.logf("WebDAV：账号「%v」改为随机用户名 %v", c["name"], c["user"])
+	}
+	return changed, nil
+}
+
 func (s *Service) SetDAV(id string, patch map[string]any) (map[string]any, error) {
 	s.mu.Lock()
 	a, ac, err := s.acctLocked(id)
@@ -392,7 +490,11 @@ func (s *Service) SetDAV(id string, patch map[string]any) (map[string]any, error
 	if v, ok := patch["user"].(string); ok {
 		v = strings.TrimSpace(v)
 		if v == "" {
-			v = config.DefaultDAVUser
+			v = s.uniqueDAVUserLocked(newDAVUser())
+		} else if s.davUserTakenLocked(v, ac.ID) {
+			// 重名会让用户分不清 /dav/ 与 /dav/<id>/ 该用哪个号，入口就拒掉。
+			s.mu.Unlock()
+			return nil, fmt.Errorf("WebDAV 用户名 %q 已经被另一台账号用了，换一个或点「随机生成」", v)
 		}
 		ac.DAVUser = v
 	}
@@ -431,6 +533,42 @@ func (s *Service) SetDAV(id string, patch map[string]any) (map[string]any, error
 
 // registerDAVRoutes wires the console API for this page.
 func (s *Service) registerDAVRoutes(mux *http.ServeMux) {
+	// POST /api/dav/reset {"id":"<账号>"} → 该账号换一组随机账号密码
+	// POST /api/dav/reset {"fix_duplicates":true} → 一键把重名/空用户名的账号换成随机
+	mux.HandleFunc("/api/dav/reset", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, "请用 POST")
+			return
+		}
+		var body struct {
+			ID            string `json:"id"`
+			FixDuplicates bool   `json:"fix_duplicates"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeErr(w, "请求格式错误: "+err.Error())
+			return
+		}
+		if body.FixDuplicates {
+			changed, err := s.FixDuplicateDAVUsers()
+			if err != nil {
+				writeErr(w, err.Error())
+				return
+			}
+			writeJSON(w, map[string]any{"ok": true, "changed": changed, "accounts": s.DAVAccountsView()})
+			return
+		}
+		id := strings.TrimSpace(body.ID)
+		if id == "" {
+			id = accID(r)
+		}
+		info, err := s.ResetDAVCredentials(id)
+		if err != nil {
+			writeErr(w, err.Error())
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "dav": info, "accounts": s.DAVAccountsView()})
+	})
+
 	mux.HandleFunc("/api/dav/accounts", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true, "accounts": s.DAVAccountsView(),
 			"enabled": s.Config().DAVEnabled})

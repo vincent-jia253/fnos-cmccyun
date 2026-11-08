@@ -390,3 +390,179 @@ func TestDAVAccountsViewFlagsDuplicateUser(t *testing.T) {
 		}
 	}
 }
+
+// WebDAV 账号密码是「完全随机」的：账号 8 位、密码 16 位，且不含易混淆字符。
+func TestRandomDAVCredentials(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 200; i++ {
+		u := newDAVUser()
+		if len(u) != 8 {
+			t.Fatalf("用户名长度应为 8，得到 %d（%q）", len(u), u)
+		}
+		if strings.ContainsAny(u, "0O1lI") {
+			t.Fatalf("用户名不该含易混淆字符：%q", u)
+		}
+		seen[u] = true
+	}
+	if len(seen) < 190 {
+		t.Errorf("200 次生成只出现 %d 个不同值，随机性可疑", len(seen))
+	}
+	pw := newDAVPassword()
+	if len(pw) != 16 {
+		t.Fatalf("密码长度应为 16，得到 %d（%q）", len(pw), pw)
+	}
+	if strings.ContainsAny(pw, "0O1lI") {
+		t.Errorf("密码不该含易混淆字符：%q", pw)
+	}
+	if newDAVPassword() == pw {
+		t.Error("两次生成的密码不该相同")
+	}
+}
+
+// 新建账号直接带随机账号密码（不再用 cmccyun 这种可读默认值）。
+func TestNewAccountHasRandomDavCredentials(t *testing.T) {
+	s, root := newMountSvc(t, "")
+	id, err := s.AddAccount("测试号", filepath.Join(root, "m1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := s.Config()
+	ac, ok := cfg.AccountByID(id)
+	if !ok {
+		t.Fatal("新账号没找到")
+	}
+	if len(ac.DAVUser) != 8 {
+		t.Errorf("新账号 WebDAV 用户名应为 8 位随机，得到 %q", ac.DAVUser)
+	}
+	if len(ac.DAVPassword) != 16 {
+		t.Errorf("新账号 WebDAV 密码应为 16 位随机，得到 %q", ac.DAVPassword)
+	}
+	if ac.DAVUser == "cmccyun" {
+		t.Error("不该再出现 cmccyun 默认用户名")
+	}
+}
+
+// 手改用户名时不许重名（入口直接拒）。
+func TestSetDAVRejectsDuplicateUser(t *testing.T) {
+	s, root := newMountSvc(t, "")
+	s.mu.Lock()
+	s.cfg.Accounts = []config.AccountConfig{
+		{ID: config.DefaultAccountID, MountPoint: filepath.Join(root, "m1"), DAVUser: "aaaa2222", DAVPassword: "p1"},
+		{ID: "acc0123456789ab", MountPoint: filepath.Join(root, "m2"), DAVUser: "bbbb3333", DAVPassword: "p2"},
+	}
+	snap := *s.cfg
+	s.mu.Unlock()
+	if err := config.Save(s.cfgPath, &snap); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetDAV("acc0123456789ab", map[string]any{"user": "aaaa2222"}); err == nil {
+		t.Fatal("重名应该被拒")
+	} else if !strings.Contains(err.Error(), "已经") {
+		t.Errorf("错误信息应说明重名，得到 %v", err)
+	}
+	// 改成没被占用的可以
+	if _, err := s.SetDAV("acc0123456789ab", map[string]any{"user": "cccc4444"}); err != nil {
+		t.Fatalf("不重名应允许：%v", err)
+	}
+	// 留空 → 自动生成 8 位随机
+	if info, err := s.SetDAV("acc0123456789ab", map[string]any{"user": ""}); err != nil {
+		t.Fatal(err)
+	} else if u := info["user"].(string); len(u) != 8 {
+		t.Errorf("留空应生成 8 位随机用户名，得到 %q", u)
+	}
+}
+
+// 单台重置：账号密码都换新。
+func TestResetDAVCredentials(t *testing.T) {
+	s, root := newMountSvc(t, "")
+	s.mu.Lock()
+	s.cfg.Accounts = []config.AccountConfig{{ID: config.DefaultAccountID, MountPoint: filepath.Join(root, "m1"), DAVUser: "olduser1", DAVPassword: "oldpassword1"}}
+	snap := *s.cfg
+	s.mu.Unlock()
+	if err := config.Save(s.cfgPath, &snap); err != nil {
+		t.Fatal(err)
+	}
+	info, err := s.ResetDAVCredentials("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info["user"] == "olduser1" || info["password"] == "oldpassword1" {
+		t.Fatal("重置后账号密码都该变")
+	}
+	if u := info["user"].(string); len(u) != 8 {
+		t.Errorf("新用户名应 8 位，得到 %q", u)
+	}
+	if pw := info["password"].(string); len(pw) != 16 {
+		t.Errorf("新密码应 16 位，得到 %q", pw)
+	}
+	// 落盘了
+	loaded, err := config.Load(s.cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ac, ok := loaded.AccountByID(""); !ok || ac.DAVUser != info["user"] {
+		t.Error("新凭据没有写进配置文件")
+	}
+}
+
+// 一键修掉重名：只动重复/为空的那几台，唯一的账号不动。
+func TestFixDuplicateDAVUsers(t *testing.T) {
+	s, root := newMountSvc(t, "")
+	s.mu.Lock()
+	s.cfg.Accounts = []config.AccountConfig{
+		{ID: config.DefaultAccountID, MountPoint: filepath.Join(root, "m1"), DAVUser: "sameuser", DAVPassword: "p1"},
+		{ID: "acc0123456789ab", MountPoint: filepath.Join(root, "m2"), DAVUser: "sameuser", DAVPassword: "p2"},
+		{ID: "acc999999999999", MountPoint: filepath.Join(root, "m3"), DAVUser: "unique11", DAVPassword: "p3"},
+		{ID: "acc888888888888", MountPoint: filepath.Join(root, "m4"), DAVUser: "", DAVPassword: ""},
+	}
+	snap := *s.cfg
+	s.mu.Unlock()
+	if err := config.Save(s.cfgPath, &snap); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := s.FixDuplicateDAVUsers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changed) != 3 {
+		t.Fatalf("应改 3 台（两台重名 + 一台空），实际 %d：%v", len(changed), changed)
+	}
+	cfg := s.Config()
+	users := map[string]string{}
+	for _, ac := range cfg.Accounts {
+		users[ac.ID] = ac.DAVUser
+		if ac.ID != "acc999999999999" && len(ac.DAVUser) != 8 {
+			t.Errorf("改过的账号用户名应 8 位：%s=%q", ac.ID, ac.DAVUser)
+		}
+	}
+	if users["acc999999999999"] != "unique11" {
+		t.Error("已经唯一的账号不该被动")
+	}
+	if users["default"] == users["acc0123456789ab"] {
+		t.Error("改完还有重名")
+	}
+	// 再跑一次：不该再改动任何东西（幂等）
+	if again, _ := s.FixDuplicateDAVUsers(); len(again) != 0 {
+		t.Errorf("第二次调用不该再改，实际改了 %d 台", len(again))
+	}
+}
+
+// 界面入口：只读凭据 + 随机生成 + 一键修重名 + 行内重置。
+func TestDavRandomCredsUIPresent(t *testing.T) {
+	for _, want := range []string{
+		`id="davUser"`,
+		`id="davPass"`,
+		`readonly title="点「随机生成」换一组"`,
+		`id="btnDavFixDup"`,
+		`data-dav-act="reset"`,
+		`/api/dav/reset`,
+		"8 位随机",
+		"16 位随机",
+		"一键修掉重名",
+	} {
+		if !strings.Contains(indexHTML, want) {
+			t.Errorf("WebDAV 页缺 %q", want)
+		}
+	}
+}

@@ -287,6 +287,56 @@ pc=$(grep -c '^PASS' "$ROOT/dav_all_checks.txt" || true); pc=${pc:-0}
 fc=$(grep -c '^FAIL' "$ROOT/dav_all_checks.txt" || true); fc=${fc:-0}
 pass=$((pass + pc)); fail=$((fail + fc))
 
+echo "== 4i. WebDAV 随机账号密码 + 重名校验 =="
+# 1) 单台重置：账号变 8 位、密码变 16 位，并且新凭据能通过 WebDAV 鉴权、旧的不行
+curl -s -X POST "$API/api/dav/reset" -H 'Content-Type: application/json' \
+     -d "{\"id\":\"$ACC2\"}" >"$ROOT/dav_reset.json"
+NEWUSER=$(python3 -c "import json;print(json.load(open('$ROOT/dav_reset.json'))['dav']['user'])")
+NEWPASS=$(python3 -c "import json;print(json.load(open('$ROOT/dav_reset.json'))['dav']['password'])")
+python3 - "$ROOT/dav_reset.json" >"$ROOT/dav_reset_checks.txt" <<'DAVRESET'
+import json, sys
+d = json.load(open(sys.argv[1]))
+def chk(n, c): print(("PASS  " if c else "FAIL  ") + n)
+u = (d.get("dav") or {}).get("user") or ""
+p = (d.get("dav") or {}).get("password") or ""
+chk("重置返回 ok", d.get("ok") is True)
+chk("用户名 8 位随机", len(u) == 8)
+chk("密码 16 位随机", len(p) == 16)
+chk("不再叫 cmccyun / u-two", u not in ("cmccyun", "u-two"))
+chk("不含易混淆字符 0O1lI", not any(c in u + p for c in "0O1lI"))
+DAVRESET
+sed 's/^/  /' "$ROOT/dav_reset_checks.txt"
+pc=$(grep -c '^PASS' "$ROOT/dav_reset_checks.txt" || true); pc=${pc:-0}
+fc=$(grep -c '^FAIL' "$ROOT/dav_reset_checks.txt" || true); fc=${fc:-0}
+pass=$((pass + pc)); fail=$((fail + fc))
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PROPFIND -u "$NEWUSER:$NEWPASS" "$API/dav/$ACC2/")
+if [ "$code" != "401" ]; then ok "新账号密码能通过 WebDAV 鉴权（$code）"; else no "新账号密码被拒了"; fi
+chk "旧用户名 u-two 已失效 → 401" "$(curl -s -o /dev/null -w '%{http_code}' -X PROPFIND -u u-two:p-two "$API/dav/$ACC2/")" "401"
+
+# 2) 重名：把第二台改成和默认账号同名，接口应直接拒绝
+code=$(curl -s -o "$ROOT/dav_dup.json" -w '%{http_code}' -X POST "$API/api/dav/config?account=$ACC2" \
+     -H 'Content-Type: application/json' -d '{"user":"u-one"}')
+if [ "$code" = "200" ]; then no "重名竟然被接受了"; else ok "重名被拒（HTTP $code）"; fi
+if grep -q "已经被另一台" "$ROOT/dav_dup.json"; then ok "错误信息说明是重名"; else no "错误信息没说清重名：$(head -c 120 "$ROOT/dav_dup.json")"; fi
+
+# 3) 一键修重名：先人为造一个重名（直接改配置不好，这里只验证接口幂等：没有重名时 changed 为空）
+curl -s -X POST "$API/api/dav/reset" -H 'Content-Type: application/json' -d '{"fix_duplicates":true}' >"$ROOT/dav_fix.json"
+python3 - "$ROOT/dav_fix.json" >"$ROOT/dav_fix_checks.txt" <<'DAVFIX'
+import json, sys
+d = json.load(open(sys.argv[1]))
+def chk(n, c): print(("PASS  " if c else "FAIL  ") + n)
+rows = d.get("accounts") or []
+users = [r.get("user") for r in rows]
+chk("接口返回 ok", d.get("ok") is True)
+chk("没有重名时不动任何账号", (d.get("changed") or []) == [])
+chk("两台用户名互不相同", len(set(users)) == len(users))
+DAVFIX
+sed 's/^/  /' "$ROOT/dav_fix_checks.txt"
+pc=$(grep -c '^PASS' "$ROOT/dav_fix_checks.txt" || true); pc=${pc:-0}
+fc=$(grep -c '^FAIL' "$ROOT/dav_fix_checks.txt" || true); fc=${fc:-0}
+pass=$((pass + pc)); fail=$((fail + fc))
+
 echo "== 5. 删除第二台：只卸它自己 =="
 curl -s -X POST "$API/api/accounts" -H 'Content-Type: application/json' \
      -d "{\"action\":\"delete\",\"id\":\"$ACC2\"}" >"$ROOT/del.json"
