@@ -24,7 +24,6 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha1"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -91,6 +90,8 @@ type QRStart struct {
 
 // QRResult 是一次轮询的结果。
 type QRResult struct {
+	// Code 是上游原始返回码，排查"扫一下就失效"这类问题全靠它。
+	Code          string
 	Status        QrStatus
 	Account       string
 	Authorization string // base64("pc:account:token")，仅 confirmed 时有值
@@ -119,11 +120,76 @@ func StartQrLogin(ctx context.Context) (*QRStart, error) {
 	if err != nil {
 		return nil, err
 	}
+	handle := base64.StdEncoding.EncodeToString(raw)
+	// 第一次轮询就是"登记"：网页版也是生成二维码后立刻查一次，上游据此建一条
+	// 待扫码的登录。扫码前不登记，手机扫到就是个不存在的会话（提示配额已失效）。
+	// 这里失败不影响出图（网络抖动时前端还会继续轮询），所以只忽略错误。
+	_, _ = PollQrLogin(ctx, handle)
 	return &QRStart{
-		Handle:    base64.StdEncoding.EncodeToString(raw),
+		Handle:    handle,
 		Content:   qrPageURL + "?sID=" + sid + "&dID=" + deviceID + "&cType=9",
 		ExpiresIn: QrLifetime,
 	}, nil
+}
+
+// qrPollPayload 是网页版扫码页 queryQrcLoginResult() 真正发的那一条：
+//
+//	{account:"", dycPwd:<sID>, type:5, authLogin:true}
+//
+// 经 AES-256-CBC 包成一串 base64 直接当请求体（不是 {"encryptMsg":…} 信封）。
+//
+// 老实现发的是飞信那套 {dycpwd,secinfo,cpid,clienttype,pintype:21,…}，上游回
+// 200059541「未找到设备的二维码信息」——那根本不是"等待扫码"，而是"这个设备根本
+// 没有二维码会话"。结果就是：控制台一直显示"等手机扫码"，手机扫到的却是个不存在
+// 的会话，于是立刻提示"二维码已失效"。
+type qrPollPayload struct {
+	Account   string `json:"account"`
+	DycPwd    string `json:"dycPwd"`
+	Type      int    `json:"type"`
+	AuthLogin bool   `json:"authLogin"`
+}
+
+func qrPollBody(sid string) ([]byte, error) {
+	plain, err := json.Marshal(qrPollPayload{Account: "", DycPwd: sid, Type: 5, AuthLogin: true})
+	if err != nil {
+		return nil, err
+	}
+	enc, err := qrEncryptCBC(plain)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(enc), nil
+}
+
+// qrStatusFromCode 把上游返回码翻成界面状态。
+//
+// 关键一条：200059541 的原话是「未找到设备的二维码信息」、9999 是「登录失败」——
+// 这两个都不是错误，而是"还没人扫/手机还没确认"。网页版对它们一律继续每 2 秒轮询，
+// 我们照做；真正表示完蛋的是 542（过期）、549（取消）和 543/545/546/547。
+func qrStatusFromCode(code, message string) *QRResult {
+	out := &QRResult{Code: code}
+	switch code {
+	case "200059548":
+		out.Status, out.Message = QrScanned, "已扫码，请在手机上点「确认登录」"
+	case "200059542":
+		out.Status, out.Message = QrExpired, "二维码已过期，请重新生成"
+	case "200059549":
+		out.Status, out.Message = QrCancelled, "手机上取消了登录"
+	case "200059543", "200059545", "200059546", "200059547":
+		out.Status = QrFailed
+		out.Message = "扫码登录失败（code " + code + "），请重新生成二维码"
+	default:
+		out.Status = QrWaiting
+		out.Message = "等待手机扫码"
+		if code != "" && code != "200059541" && code != "9999" {
+			// 不认识的码也先当"继续等"，但把码带上，方便对日志。
+			out.Message = fmt.Sprintf("等待手机扫码（code %s）", code)
+		}
+		if strings.TrimSpace(message) != "" && code == "" {
+			out.Message = strings.TrimSpace(message)
+		}
+	}
+	return out
 }
 
 // PollQrLogin 带着 handle 问一次上游：扫了没 / 能不能给令牌。
@@ -137,7 +203,10 @@ func PollQrLogin(ctx context.Context, handle string) (*QRResult, error) {
 		return nil, errors.New("扫码会话无效，请重新生成二维码")
 	}
 
-	plain := qrPayload(h.Sid)
+	plain, err := json.Marshal(qrPollPayload{Account: "", DycPwd: h.Sid, Type: 5, AuthLogin: true})
+	if err != nil {
+		return nil, err
+	}
 	body, err := qrEncryptCBC(plain)
 	if err != nil {
 		return nil, err
@@ -174,27 +243,11 @@ func PollQrLogin(ctx context.Context, handle string) (*QRResult, error) {
 		}
 	}
 	if !ok {
-		switch code {
-		case "200059541":
-			return &QRResult{Status: QrWaiting, Message: "等待手机扫码"}, nil
-		case "200059548":
-			return &QRResult{Status: QrScanned, Message: "已扫码，请在手机上点「确认登录」"}, nil
-		case "200059542":
-			return &QRResult{Status: QrExpired, Message: "二维码已过期，请重新生成"}, nil
-		case "200059549":
-			return &QRResult{Status: QrCancelled, Message: "手机上取消了登录"}, nil
-		}
 		msg := asString(obj["message"])
 		if msg == "" {
 			msg = asString(obj["msg"])
 		}
-		if msg == "" {
-			msg = "登录未完成"
-		}
-		if code != "" {
-			msg = fmt.Sprintf("%s（code %s）", msg, code)
-		}
-		return &QRResult{Status: QrFailed, Message: msg}, nil
+		return qrStatusFromCode(code, msg), nil
 	}
 
 	acc, tok, err := qrDecodeData(obj["data"])
@@ -233,34 +286,6 @@ func qrFetchPublicKey(ctx context.Context) (string, error) {
 
 // qrPayload 是 thirdlogin 的明文请求体。字段顺序不能动——mcloud-sign 是对
 // 这串字符做签名再比对的。
-type qrLoginPayload struct {
-	Msisdn     string      `json:"msisdn"`
-	Random     string      `json:"random"`
-	Dycpwd     string      `json:"dycpwd"`
-	Cpid       int         `json:"cpid"`
-	Clienttype int         `json:"clienttype"`
-	Version    string      `json:"version"`
-	Pintype    int         `json:"pintype"`
-	Secinfo    string      `json:"secinfo"`
-	LoginMode  string      `json:"loginMode"`
-	ExtInfo    interface{} `json:"extInfo"`
-}
-
-func qrPayload(sid string) []byte {
-	sum := sha1.Sum([]byte("fetion.com.cn:" + sid))
-	p := qrLoginPayload{
-		Dycpwd:     sid,
-		Cpid:       292,
-		Clienttype: 670,
-		Version:    "mCloud_4.3.0_536",
-		Pintype:    21,
-		Secinfo:    strings.ToUpper(hex.EncodeToString(sum[:])),
-		LoginMode:  "0",
-		ExtInfo:    struct{}{},
-	}
-	b, _ := json.Marshal(p)
-	return b
-}
 
 func qrBaseHeaders() map[string]string {
 	return map[string]string{

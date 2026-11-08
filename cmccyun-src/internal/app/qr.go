@@ -25,6 +25,10 @@ type qrSession struct {
 	expires time.Time
 	// acct 是这次扫码要写到哪个账号上（多账号下每台云盘各自扫一次）。
 	acct string
+	// lastStatus/lastCode 只用来"变化时打一行日志"：扫码失败时（比如扫一下就失效）
+	// 得能一眼看出上游到底回了什么，否则只能靠猜。
+	lastStatus string
+	lastCode   string
 }
 
 // StartQrLogin 生成一次扫码会话，返回 id、二维码 PNG 和有效期（秒）。
@@ -80,6 +84,13 @@ func (s *Service) PollQrLogin(ctx context.Context, id string) (map[string]any, e
 		s.logf("扫码登录：轮询失败：%v", err)
 		return nil, err
 	}
+	// 状态一变就记一行（含上游原始码），排查"扫码就失效"时直接看日志。
+	s.qrMu.Lock()
+	if cur := s.qr[id]; cur != nil && (cur.lastStatus != string(res.Status) || cur.lastCode != res.Code) {
+		cur.lastStatus, cur.lastCode = string(res.Status), res.Code
+		s.logf("扫码登录：状态 %s（上游 code=%s）", res.Status, res.Code)
+	}
+	s.qrMu.Unlock()
 
 	out := map[string]any{
 		"ok":      true,
