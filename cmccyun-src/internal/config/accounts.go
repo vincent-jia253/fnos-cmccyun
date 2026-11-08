@@ -30,6 +30,13 @@ type AccountConfig struct {
 	DAVUser     string `json:"dav_user,omitempty"`
 	DAVPassword string `json:"dav_password,omitempty"`
 	DAVRedirect *bool  `json:"dav_redirect,omitempty"`
+	// DAVPath 是 WebDAV 地址里那一段随机路径（8 位小写字母+数字），
+	// 形如 http://NAS:19898/dav/ab3k9mnp/。为空时退回老规则
+	// （默认账号 /dav/，其余 /dav/<账号ID>/），老配置不需要迁移。
+	DAVPath string `json:"dav_path,omitempty"`
+	// DAVPathPrev 是上一版路径：换路径那一刻把旧值挪到这里，路由继续认它，
+	// 这样已经配好的客户端不会因为点了一下「换路径」就断掉。
+	DAVPathPrev string `json:"dav_path_prev,omitempty"`
 
 	StrmEnabled       bool       `json:"strm_enabled,omitempty"`
 	StrmPairs         []StrmPair `json:"strm_pairs,omitempty"`

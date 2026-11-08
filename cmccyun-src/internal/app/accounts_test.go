@@ -104,8 +104,11 @@ func TestAccountsHTTPLifecycle(t *testing.T) {
 	if cfgMap["mount_point"] != newMount {
 		t.Errorf("config.mount_point = %v，想要 %s", cfgMap["mount_point"], newMount)
 	}
-	if cfgMap["dav_path"] != "/dav/"+id+"/" {
-		t.Errorf("非默认账号的 WebDAV 路径应为 /dav/%s/，实际 %v", id, cfgMap["dav_path"])
+	// v2.3.0 起新账号的 WebDAV 路径是 /dav/<8 位随机>/，不再暴露账号 ID
+	davPath, _ := cfgMap["dav_path"].(string)
+	seg := strings.Trim(strings.TrimPrefix(davPath, "/dav/"), "/")
+	if seg == "" || len(seg) != 8 || strings.Contains(seg, id) {
+		t.Errorf("新账号的 WebDAV 路径应为 /dav/<8 位随机>/，实际 %v", cfgMap["dav_path"])
 	}
 
 	// 默认账号的挂载点不能被这次新增/读取动过

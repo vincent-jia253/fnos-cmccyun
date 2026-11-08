@@ -80,6 +80,7 @@ echo "二进制: $BIN"
 echo "第二账号 ID: $ACC2"
 
 echo "== 1. 启动（假后端，自动挂载两台） =="
+CMCCYUN_EXTRA_ROOTS="$ROOT" \
 CMCCYUN_ETC="$ROOT/etc" \
 CMCCYUN_DEBUG_FAKE="$ROOT/backend" \
     nohup "$BIN" run -c "$ROOT/etc/config.json" >"$ROOT/daemon.out" 2>&1 &
@@ -336,6 +337,67 @@ sed 's/^/  /' "$ROOT/dav_fix_checks.txt"
 pc=$(grep -c '^PASS' "$ROOT/dav_fix_checks.txt" || true); pc=${pc:-0}
 fc=$(grep -c '^FAIL' "$ROOT/dav_fix_checks.txt" || true); fc=${fc:-0}
 pass=$((pass + pc)); fail=$((fail + fc))
+
+echo "== 4j. 新账号的 WebDAV 路径是 /dav/8位随机 =="
+NEWMOUNT="$ROOT/mnt3"
+mkdir -p "$NEWMOUNT"
+curl -s -X POST "$API/api/accounts" -H 'Content-Type: application/json' \
+     -d "{\"action\":\"add\",\"name\":\"随机路径号\",\"mount_point\":\"$NEWMOUNT\"}" >"$ROOT/acct3.json"
+NEWID=$(python3 -c "import json;print(json.load(open('$ROOT/acct3.json')).get('id',''))")
+NEWPATH=$(python3 -c "
+import json
+d=json.load(open('$ROOT/acct3.json'))
+for a in (d.get('accounts') or []):
+    if a.get('id')=='$NEWID': print(a.get('dav_path') or '')")
+NEWU=$(python3 -c "
+import json
+d=json.load(open('$ROOT/api/dav_accounts.json')) if False else None" 2>/dev/null || true)
+python3 - "$ROOT/acct3.json" "$NEWID" >"$ROOT/acct3_checks.txt" <<'ACCT3'
+import json, sys
+d = json.load(open(sys.argv[1])); nid = sys.argv[2]
+def chk(n, c): print(("PASS  " if c else "FAIL  ") + n)
+rows = {a.get("id"): a for a in (d.get("accounts") or [])}
+a = rows.get(nid) or {}
+p = a.get("dav_path") or ""
+seg = p.strip("/").split("/")[-1] if p else ""
+chk("新增账号成功", bool(nid))
+chk("WebDAV 路径形如 /dav/<8位>/", p.startswith("/dav/") and len(seg) == 8)
+chk("路径只用小写字母数字", seg.isalnum() and seg == seg.lower())
+chk("账号自带 8 位随机用户名", len(a.get("dav_user") or "") == 8)
+ACCT3
+sed 's/^/  /' "$ROOT/acct3_checks.txt"
+pc=$(grep -c '^PASS' "$ROOT/acct3_checks.txt" || true); pc=${pc:-0}
+fc=$(grep -c '^FAIL' "$ROOT/acct3_checks.txt" || true); fc=${fc:-0}
+pass=$((pass + pc)); fail=$((fail + fc))
+
+# 用新路径 + 该账号的随机凭据访问：应通过鉴权（不是 401）
+NEWUSER=$(sudo -n python3 -c "
+import json;c=json.load(open('$ROOT/etc/config.json'))
+for a in c['accounts']:
+    if a.get('id')=='$NEWID': print(a.get('dav_user') or '')" 2>/dev/null || python3 -c "
+import json;c=json.load(open('$ROOT/etc/config.json'))
+for a in c['accounts']:
+    if a.get('id')=='$NEWID': print(a.get('dav_user') or '')")
+NEWPW=$(python3 -c "
+import json;c=json.load(open('$ROOT/etc/config.json'))
+for a in c['accounts']:
+    if a.get('id')=='$NEWID': print(a.get('dav_password') or '')")
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PROPFIND -u "$NEWUSER:$NEWPW" "$API$NEWPATH")
+if [ "$code" != "401" ]; then ok "随机路径 + 随机凭据能访问（$code）"; else no "随机路径访问被拒（401）"; fi
+
+# 换路径：接口给新的一段，旧地址仍然可用
+curl -s -X POST "$API/api/dav/reset" -H 'Content-Type: application/json' \
+     -d "{\"id\":\"$NEWID\",\"new_path\":true}" >"$ROOT/dav_newpath.json"
+NEWPATH2=$(python3 -c "import json;print((json.load(open('$ROOT/dav_newpath.json')).get('dav') or {}).get('path') or '')")
+if [ -n "$NEWPATH2" ] && [ "$NEWPATH2" != "$NEWPATH" ]; then ok "换路径生效（$NEWPATH → $NEWPATH2）"; else no "换路径没生效（$NEWPATH → $NEWPATH2）"; fi
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PROPFIND -u "$NEWUSER:$NEWPW" "$API$NEWPATH")
+if [ "$code" != "401" ]; then ok "旧路径仍可用（$code，不打断已配好的客户端）"; else no "旧路径立刻失效了"; fi
+
+# 清理：只有真的建出账号才删，别影响后面的删除用例
+if [ -n "$NEWID" ]; then
+    curl -s -X POST "$API/api/accounts" -H 'Content-Type: application/json' -d "{\"action\":\"delete\",\"id\":\"$NEWID\"}" >/dev/null
+    sleep 1
+fi
 
 echo "== 5. 删除第二台：只卸它自己 =="
 curl -s -X POST "$API/api/accounts" -H 'Content-Type: application/json' \

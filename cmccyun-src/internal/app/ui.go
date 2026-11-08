@@ -657,6 +657,7 @@ const indexHTML = `<!DOCTYPE html>
             <input id="davURL" spellcheck="false" readonly />
             <button id="btnDavCopy" style="flex:0 0 auto">复制地址</button>
             <button id="btnDavCopyAuth" style="flex:0 0 auto">复制账号密码</button>
+            <button id="btnDavNewPath" style="flex:0 0 auto" title="换一个 8 位随机路径（旧地址仍然可用，不会立刻断）">换路径</button>
           </div>
           <div id="davURLs" class="hint" style="margin-top:7px"></div>
           <div class="checkline" style="height:34px">
@@ -1628,7 +1629,7 @@ async function loadDavAccounts() {
       var dl = a.redirect ? "302 到 CDN" : "本机代理";
       html += "<tr>" +
         "<td>" + name + '<div class="hint">' + esc(a.account || "") + "</div></td>" +
-        '<td><code class="k">' + esc(a.url || a.path || "") + "</code></td>" +
+        '<td><code class="k">' + esc(a.path || "") + '</code><div class="hint">' + esc(a.url || "") + "</div></td>" +
         "<td>" + unameCell + "</td>" +
         "<td>" + pw + "</td>" +
         "<td>" + ro + "</td>" +
@@ -1744,6 +1745,18 @@ $("btnDavReset").onclick = async function () {
   } catch (e) { toast(e.message, "err"); }
   finally { busy(this, false); }
 };
+$("btnDavNewPath").onclick = async function () {
+  if (!confirm("换一个新的 WebDAV 路径（8 位随机）？\n\n新地址形如 /dav/ab3k9mnp/；旧地址仍然可用，所以已经连上的客户端不会立刻断，你可以慢慢改。")) return;
+  busy(this, true, "生成中…");
+  try {
+    var r = await api("/api/dav/reset", { method: "POST", body: JSON.stringify({ id: curAccount, new_path: true }) });
+    if (r.dav) davShow(r.dav);
+    toast("已生成新地址（旧地址仍可用）", "ok");
+    loadDav();
+  } catch (e) { toast(e.message, "err"); }
+  finally { busy(this, false); }
+};
+
 $("btnDavCopy").onclick = function () { davCopy($("davURL").value, this); };
 $("btnDavCopyAuth").onclick = function () {
   davCopy("地址：" + $("davURL").value + "\n用户名：" + $("davUser").value + "\n密码：" + $("davPass").value, this);

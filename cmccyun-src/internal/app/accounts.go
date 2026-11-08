@@ -41,7 +41,7 @@ func (s *Service) AccountsView() []map[string]any {
 			"strm_enabled":      ac.StrmEnabled,
 			"dav_user":          ac.DAVUser,
 			"dav_password_set":  ac.DAVPassword != "",
-			"dav_path":          davPathFor(ac.ID),
+			"dav_path":          davPathFor(ac),
 			"default":           ac.ID == cfg.DefaultAccount,
 			"auth_days":         st.Auth.ExpiresDays,
 			"last_error":        st.LastError,
@@ -95,6 +95,7 @@ func (s *Service) AddAccount(name, mountPoint string) (string, error) {
 		MountPoint:      mountPoint,
 		DAVUser:         s.uniqueDAVUserLocked(newDAVUser()),
 		DAVPassword:     newDAVPassword(),
+		DAVPath:         s.uniqueDAVPathLocked(),
 		StrmMode:        "auto",
 		StrmIntervalMin: 5,
 	})

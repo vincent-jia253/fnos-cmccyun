@@ -112,11 +112,71 @@ func (s *Service) davFSLocked(id string) *dav.FS {
 }
 
 // davPathFor 是一台账号的 WebDAV 挂载路径：默认账号同时占据 /dav/（老地址不变）。
-func davPathFor(id string) string {
-	if id == "" || id == config.DefaultAccountID {
+// davPathFor 返回这台账号的 WebDAV 路径。
+//
+// 新账号一律是 /dav/<8 位随机>/（添加账号时自动生成，见 newDAVPath）；
+// 老配置里没有 dav_path 的账号沿用老规则：默认账号 /dav/，其余 /dav/<账号ID>/，
+// 这样已经配好的客户端不会因为升级而失效。
+func davPathFor(ac *config.AccountConfig) string {
+	if ac == nil {
 		return "/dav/"
 	}
-	return "/dav/" + id + "/"
+	if p := strings.TrimSpace(ac.DAVPath); p != "" {
+		return "/dav/" + p + "/"
+	}
+	if ac.ID == "" || ac.ID == config.DefaultAccountID {
+		return "/dav/"
+	}
+	return "/dav/" + ac.ID + "/"
+}
+
+// davPathForID 是给只有账号 ID 的调用方用的糖。
+func (s *Service) davPathForID(id string) string {
+	cfg := s.Config()
+	if ac, ok := cfg.AccountByID(id); ok {
+		return davPathFor(ac)
+	}
+	return davPathFor(nil)
+}
+
+// newDAVPath 生成 8 位随机路径段：只用小写字母 + 数字（URL 里不用转义），
+// 并去掉 0/o/1/l/i 这些容易看错的字符。
+func newDAVPath() string {
+	const alphabet = "abcdefghjkmnpqrstuvwxyz23456789"
+	out := make([]byte, 8)
+	limit := big.NewInt(int64(len(alphabet)))
+	for i := range out {
+		idx, err := rand.Int(rand.Reader, limit)
+		if err != nil {
+			b := make([]byte, 8)
+			_, _ = rand.Read(b)
+			return strings.ToLower(base64.RawURLEncoding.EncodeToString(b))[:8]
+		}
+		out[i] = alphabet[idx.Int64()]
+	}
+	return string(out)
+}
+
+// uniqueDAVPathLocked 挑一个没被任何账号（含账号 ID）占用的随机路径段。
+func (s *Service) uniqueDAVPathLocked() string {
+	taken := map[string]bool{}
+	for i := range s.cfg.Accounts {
+		ac := &s.cfg.Accounts[i]
+		taken[strings.ToLower(ac.ID)] = true
+		if p := strings.ToLower(strings.TrimSpace(ac.DAVPath)); p != "" {
+			taken[p] = true
+		}
+		if p := strings.ToLower(strings.TrimSpace(ac.DAVPathPrev)); p != "" {
+			taken[p] = true
+		}
+	}
+	for n := 0; n < 64; n++ {
+		cand := newDAVPath()
+		if !taken[cand] {
+			return cand
+		}
+	}
+	return newDAVPath()
 }
 
 // davConf 是处理一个 WebDAV 请求需要的全部配置快照。
@@ -179,6 +239,17 @@ func (s *Service) davRouteID(p string) string {
 		return ""
 	}
 	snap := s.Config()
+	// ① 随机路径（新账号的正式地址）+ 上一版路径（换过路径的老地址）
+	for i := range snap.Accounts {
+		ac := &snap.Accounts[i]
+		if p := ac.DAVPath; p != "" && strings.EqualFold(p, seg) {
+			return ac.ID
+		}
+		if p := ac.DAVPathPrev; p != "" && strings.EqualFold(p, seg) {
+			return ac.ID
+		}
+	}
+	// ② 账号 ID（老地址，保留兼容）
 	if _, ok := snap.AccountByID(seg); ok {
 		return seg
 	}
@@ -321,7 +392,7 @@ func (s *Service) DAVAccountsView() []map[string]any {
 	out := make([]map[string]any, 0, len(cfg.Accounts))
 	for i := range cfg.Accounts {
 		ac := &cfg.Accounts[i]
-		path := davPathFor(ac.ID)
+		path := davPathFor(ac)
 		urls := make([]string, 0, 4)
 		for _, host := range localIPv4() {
 			urls = append(urls, fmt.Sprintf("http://%s:%d%s", host, cfg.WebPort, path))
@@ -354,7 +425,7 @@ func (s *Service) DAVInfo(id string) map[string]any {
 	if !ok {
 		return map[string]any{"enabled": false, "urls": []string{}}
 	}
-	path := davPathFor(ac.ID)
+	path := davPathFor(ac)
 	urls := make([]string, 0, 4)
 	for _, host := range localIPv4() {
 		urls = append(urls, fmt.Sprintf("http://%s:%d%s", host, cfg.WebPort, path))
@@ -417,6 +488,28 @@ func (s *Service) ResetDAVCredentials(id string) (map[string]any, error) {
 		return nil, err
 	}
 	s.logf("WebDAV：账号「%s」换了一组随机账号密码（用户名 %s）", name, user)
+	return s.DAVInfo(id), nil
+}
+
+// ResetDAVPath 给指定账号换一个 8 位随机 WebDAV 路径（老地址仍然可用，不会立刻断）。
+func (s *Service) ResetDAVPath(id string) (map[string]any, error) {
+	s.mu.Lock()
+	ac, ok := s.cfg.AccountByID(id)
+	if !ok {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("账号不存在：%s", id)
+	}
+	if old := strings.TrimSpace(ac.DAVPath); old != "" {
+		ac.DAVPathPrev = old
+	}
+	ac.DAVPath = s.uniqueDAVPathLocked()
+	name, path := ac.DisplayName(), davPathFor(ac)
+	snapshot := *s.cfg
+	s.mu.Unlock()
+	if err := config.Save(s.cfgPath, &snapshot); err != nil {
+		return nil, err
+	}
+	s.logf("WebDAV：账号「%s」的地址改为 %s（旧地址仍可用）", name, path)
 	return s.DAVInfo(id), nil
 }
 
@@ -498,6 +591,12 @@ func (s *Service) SetDAV(id string, patch map[string]any) (map[string]any, error
 		}
 		ac.DAVUser = v
 	}
+	if v, ok := patch["new_path"].(bool); ok && v {
+		if old := strings.TrimSpace(ac.DAVPath); old != "" {
+			ac.DAVPathPrev = old
+		}
+		ac.DAVPath = s.uniqueDAVPathLocked()
+	}
 	if v, ok := patch["password"].(string); ok {
 		v = strings.TrimSpace(v)
 		if v == "" {
@@ -543,6 +642,7 @@ func (s *Service) registerDAVRoutes(mux *http.ServeMux) {
 		var body struct {
 			ID            string `json:"id"`
 			FixDuplicates bool   `json:"fix_duplicates"`
+			NewPath       bool   `json:"new_path"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeErr(w, "请求格式错误: "+err.Error())
@@ -560,6 +660,15 @@ func (s *Service) registerDAVRoutes(mux *http.ServeMux) {
 		id := strings.TrimSpace(body.ID)
 		if id == "" {
 			id = accID(r)
+		}
+		if body.NewPath {
+			info, err := s.ResetDAVPath(id)
+			if err != nil {
+				writeErr(w, err.Error())
+				return
+			}
+			writeJSON(w, map[string]any{"ok": true, "dav": info, "accounts": s.DAVAccountsView()})
+			return
 		}
 		info, err := s.ResetDAVCredentials(id)
 		if err != nil {

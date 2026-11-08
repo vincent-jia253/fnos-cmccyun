@@ -252,7 +252,7 @@ func (s *Service) MaskPtrFor(id string) map[string]any {
 	}
 	m["account_id"] = ac.ID
 	m["account_name"] = ac.DisplayName()
-	m["dav_path"] = davPathFor(ac.ID)
+	m["dav_path"] = davPathFor(ac)
 	return m
 }
 
@@ -353,7 +353,7 @@ func (s *Service) StatusOf(id string) Status {
 		MountPoint: mp,
 		ReadOnly:   ac.ReadOnly,
 		LastError:  a.lastErr,
-		DAVPath:    davPathFor(ac.ID),
+		DAVPath:    davPathFor(ac),
 	}
 	if a.client != nil {
 		st.Auth = a.client.AuthState()

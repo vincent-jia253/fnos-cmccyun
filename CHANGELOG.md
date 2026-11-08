@@ -2,6 +2,18 @@
 
 版本号与应用内 `manifest` 的 `changelog` 字段保持一致；安装包在 [Releases](https://github.com/vincent-jia253/fnos-cmccyun/releases) 里。
 
+## v2.3.0
+
+WebDAV 地址改成「每台一个随机路径」，不再把账号 ID 暴露在 URL 里：
+
+- 新账号添加时自动生成 `dav_path`（8 位随机，小写字母+数字，去掉 0/o/1/l/i），地址形如
+  `http://<NAS>:19898/dav/ab3k9mnp/`。
+- WebDAV 页新增「换路径」：换完上一版路径仍可用（`dav_path_prev` 参与路由），已配好的客户端不会立刻断。
+- 老地址继续兼容：`/dav/` 与 `/dav/<账号ID>/` 照旧可用，升级无需改客户端。
+- 总览「地址」列把路径与完整 URL 分两行显示。
+
+测试 146 → 150 项，多账号 e2e 76 → 83 项。
+
 ## v2.2.0
 
 - 新建账号的 WebDAV 凭据改为完全随机：用户名 8 位、密码 16 位（crypto/rand，去掉 0/O/1/l/I）。

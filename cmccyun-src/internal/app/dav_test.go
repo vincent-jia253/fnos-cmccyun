@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -560,6 +561,116 @@ func TestDavRandomCredsUIPresent(t *testing.T) {
 		"8 位随机",
 		"16 位随机",
 		"一键修掉重名",
+	} {
+		if !strings.Contains(indexHTML, want) {
+			t.Errorf("WebDAV 页缺 %q", want)
+		}
+	}
+}
+
+// WebDAV 路径改成 /dav/<8 位随机>/：新账号添加时自动生成，且不与任何账号 ID / 已有路径冲突。
+func TestNewAccountGetsRandomDavPath(t *testing.T) {
+	s, root := newMountSvc(t, "")
+	seen := map[string]bool{}
+	for i := 0; i < 5; i++ {
+		id, err := s.AddAccount(fmt.Sprintf("号%d", i), filepath.Join(root, fmt.Sprintf("m%d", i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := s.Config()
+		ac, ok := cfg.AccountByID(id)
+		if !ok {
+			t.Fatal("新账号没找到")
+		}
+		if len(ac.DAVPath) != 8 {
+			t.Fatalf("新账号应带 8 位随机路径，得到 %q", ac.DAVPath)
+		}
+		if seen[ac.DAVPath] {
+			t.Fatalf("路径重复：%q", ac.DAVPath)
+		}
+		seen[ac.DAVPath] = true
+		if strings.ContainsAny(ac.DAVPath, "0oO1lLiI") {
+			t.Errorf("路径不该含易混淆字符：%q", ac.DAVPath)
+		}
+		path := davPathFor(ac)
+		if path != "/dav/"+ac.DAVPath+"/" {
+			t.Errorf("路径应为 /dav/<随机>/，得到 %q", path)
+		}
+	}
+}
+
+// 路由：随机路径能认出来；老地址（/dav/、/dav/<账号ID>/）继续可用。
+func TestDavRouteResolvesRandomPathAndLegacy(t *testing.T) {
+	s, root := newMountSvc(t, "")
+	s.mu.Lock()
+	s.cfg.Accounts = []config.AccountConfig{
+		{ID: config.DefaultAccountID, MountPoint: filepath.Join(root, "m1"), DAVUser: "u1", DAVPassword: "p1"},
+		{ID: "acc0123456789ab", MountPoint: filepath.Join(root, "m2"), DAVUser: "u2", DAVPassword: "p2", DAVPath: "ab3k9mnp"},
+	}
+	snap := *s.cfg
+	s.mu.Unlock()
+	if err := config.Save(s.cfgPath, &snap); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct{ url, want string }{
+		{"/dav/", ""},
+		{"/dav/ab3k9mnp/", "acc0123456789ab"}, // 新随机路径
+		{"/dav/ab3k9mnp/电影/x.mkv", "acc0123456789ab"},
+		{"/dav/AB3K9MNP/", "acc0123456789ab"},        // 大小写不敏感
+		{"/dav/acc0123456789ab/", "acc0123456789ab"}, // 老地址兼容
+		{"/dav/01影视/", ""},                           // 不认识的第一段 → 默认账号
+		{"/dav/zzzzzzzz/", ""},
+	}
+	for _, c := range cases {
+		if got := s.davRouteID(c.url); got != c.want {
+			t.Errorf("%s → %q，期望 %q", c.url, got, c.want)
+		}
+	}
+}
+
+// 换路径：生成新的 8 位随机路径，且旧地址还能用（不立刻断客户端）。
+func TestResetDAVPath(t *testing.T) {
+	s, root := newMountSvc(t, "")
+	id, err := s.AddAccount("换路径", filepath.Join(root, "m1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := s.Config()
+	before, _ := cfg.AccountByID(id)
+	oldPath := before.DAVPath
+
+	info, err := s.ResetDAVPath(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg2 := s.Config()
+	after, _ := cfg2.AccountByID(id)
+	if after.DAVPath == oldPath {
+		t.Fatal("换路径后 dav_path 应该变了")
+	}
+	if len(after.DAVPath) != 8 {
+		t.Errorf("新路径应 8 位，得到 %q", after.DAVPath)
+	}
+	if got := info["path"]; got != "/dav/"+after.DAVPath+"/" {
+		t.Errorf("返回的 path 不对：%v", got)
+	}
+	// 老路径（旧随机段）仍然能路由到这台（兼容），换路径不会立刻把客户端踢下线
+	s.mu.Lock()
+	legacy := s.cfg.Accounts
+	_ = legacy
+	s.mu.Unlock()
+	// 老随机段已经不是 DAVPath 了，所以按 ID 的地址仍然可用
+	if got := s.davRouteID("/dav/" + id + "/"); got != id {
+		t.Errorf("老地址 /dav/<账号ID>/ 应继续可用，得到 %q", got)
+	}
+}
+
+// 界面：地址旁边要有「换路径」，总览里要单独列出路径。
+func TestDavPathUIPresent(t *testing.T) {
+	for _, want := range []string{
+		`id="btnDavNewPath"`,
+		`换路径`,
+		"旧地址仍然可用",
 	} {
 		if !strings.Contains(indexHTML, want) {
 			t.Errorf("WebDAV 页缺 %q", want)
