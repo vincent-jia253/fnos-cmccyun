@@ -2,6 +2,16 @@
 
 版本号与应用内 `manifest` 的 `changelog` 字段保持一致；安装包在 [Releases](https://github.com/vincent-jia253/fnos-cmccyun/releases) 里。
 
+## v2.1.0
+
+扫码登录按本机 `/vol4/@appcenter/yun139`（能用的 node 客户端）的实现重做并恢复：
+
+- 请求体回到飞信那套（`dycpwd` + `secinfo` + `pintype:21` …），AES-256-CBC → base64 直接当 body，
+  `mcloud-sign` 签明文；设备头带齐 `mcloud-channel/client/version`、`x-inner-ntwk`、`x-m4c-*` 等。
+- v1.9.1 的错误：把它改成网页版扫码页的 `{"account":"","dycPwd":…,"type":5}`，上游固定回 9999。
+- 验证信号：轮询返回从 `9999` 变回 `200059541`（等待扫码，与能用的客户端一致）。
+- 测试 128 → 135 项。
+
 ## v2.0.0
 
 - **移除扫码登录**：139 侧始终不认我们生成的会话（请求体已与网页版逐字节一致，仍固定回 9999），

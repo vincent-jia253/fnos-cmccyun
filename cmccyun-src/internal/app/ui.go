@@ -485,19 +485,52 @@ const indexHTML = `<!DOCTYPE html>
     <!-- ===== 授权 ===== -->
     <section class="panel" id="tab-auth">
 
-            <!-- 扫码登录已移除（v2.0.0）：授权走「书签一键复制 / 手工粘贴」两条路 -->
-
-      <!-- 授权：书签 / 手工粘贴 -->
+      <!-- ① 扫码登录：推荐路径 -->
       <div class="card">
         <div class="hd">
-          <h2>授权（Authorization）</h2>
-          <span class="sub">两种方式：① 下面的书签一键复制（推荐）② 手工从 F12 里抄</span>
+          <h2>扫码登录</h2><span class="tag">推荐</span>
+          <span class="sub">手机扫一下就行，不用开 F12 抓包</span>
+        </div>
+        <div class="bd">
+          <div class="qrwrap">
+            <div class="qrbox">
+              <img id="qrImg" alt="登录二维码" src="" />
+              <div id="qrPh" class="qrph">
+                <div class="qico">▣</div>
+                <div>还没有二维码<br />点右侧「生成二维码」</div>
+              </div>
+            </div>
+            <div class="qrside">
+              <ol class="steps">
+                <li>手机打开<b>中国移动云盘</b>App（139 邮箱 / 移动云盘都可以），确认已登录。</li>
+                <li>用 App 里的「扫一扫」扫左边这个二维码。</li>
+                <li>手机上点<b>确认登录</b>；这边会自动保存授权，并且<b>顺手把云盘挂载好</b>。</li>
+              </ol>
+              <div class="actions">
+                <button id="btnQrStart" class="primary">生成二维码</button>
+                <button id="btnQrStop">停止</button>
+              </div>
+              <div id="qrMsg" class="msg"></div>
+              <div class="hint" style="margin-top:4px">
+                二维码 5 分钟有效、扫完即作废，是<b>一次性临时凭据</b>，不会保存到磁盘上。
+                服务端只保留一张内存里的会话表，进程重启就得重扫——这是故意的。
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ② 手工粘贴：备选路径 -->
+      <div class="card">
+        <div class="hd">
+          <h2>手工粘贴 Authorization</h2>
+          <span class="sub">备选：扫码用不了的时候（手机不在身边、脚本批量部署）</span>
         </div>
         <div class="bd">
           <ol class="steps">
-            <li>浏览器打开 <code>https://yun.139.com/w/</code> 并登录要授权的那个账号（电脑版网页）。</li>
-            <li><b>推荐</b>：展开下面「用书签两步拿到授权」，点「复制代码」→ 存成书签 → 在 139 页面点一下，整条 Authorization 就进剪贴板了。</li>
-            <li>或者走老办法：F12 → Network → 点开任意一条 <code>file/list</code> 请求 → Request Headers 里复制 <code>Authorization</code>（<code>Basic </code> 后面那串）。</li>
+            <li>浏览器打开 <code>https://yun.139.com/w/</code> 并登录（用电脑版网页）。</li>
+            <li>按 F12 打开开发者工具 → Network，筛选 <code>file/list</code> 或 <code>hcy</code>。</li>
+            <li>点开任意一条请求，在 Request Headers 里复制 <code>Authorization</code> 的值（<code>Basic </code> 后面的部分即可）。</li>
           </ol>
           <div class="field">
             <label>Authorization</label>
@@ -987,6 +1020,7 @@ function showTab(name) {
   if (name === "strm") loadStrm();
   if (name === "browse" && !browseLoaded && lastSt && lastSt.has_token) { browseLoaded = true; browse("/"); }
   // 第一次进「授权」页又没授权时，直接把二维码摆出来——少点一次按钮
+  if (name === "auth" && !qrAutoStarted && lastSt && !lastSt.has_token) { qrAutoStarted = true; qrStart(); }
 }
 document.querySelectorAll(".tab").forEach(function (b) {
   b.onclick = function () { showTab(b.dataset.tab); };
@@ -1778,6 +1812,85 @@ async function loadLogs() {
 }
 
 /* ---------------- 扫码登录 ---------------- */
+// 二维码是服务端用 PNG 渲出来的，前端只负责显示 + 轮询；会话 id 是随机的，
+// 真正的凭据（skey）留在服务端，不落盘。
+var qrId = "", qrTimer = null, qrStopFlag = false, qrAutoStarted = false;
+
+function qrSetImage(on) {
+  $("qrImg").className = on ? "on" : "";
+  $("qrPh").className = on ? "qrph off" : "qrph";
+}
+
+function qrHalt(msg) {
+  qrStopFlag = true;
+  if (qrTimer) { clearTimeout(qrTimer); qrTimer = null; }
+  $("btnQrStart").disabled = false;
+  if (msg) say("qrMsg", msg, false);
+}
+
+async function qrStart() {
+  var b = $("btnQrStart");
+  qrStopFlag = false;
+  if (qrTimer) { clearTimeout(qrTimer); qrTimer = null; }
+  busy(b, true, "生成中…");
+  try {
+    var d = await api("/api/auth/qr/start", { method: "POST", timeout: 45000 });
+    qrId = d.id || "";
+    $("qrImg").src = d.image;
+    qrSetImage(true);
+    var mins = Math.max(1, Math.round((d.expires_in || 300) / 60));
+    say("qrMsg", "请用手机 App 扫左边的二维码（" + mins + " 分钟内有效）", true);
+    qrPoll();
+  } catch (e) {
+    qrSetImage(false);
+    say("qrMsg", "生成失败：" + e.message, false);
+    toast("生成二维码失败", "err");
+  }
+  busy(b, false);
+}
+
+async function qrPoll() {
+  if (qrStopFlag || !qrId) return;
+  var again = true;
+  try {
+    var d = await api("/api/auth/qr/poll?id=" + encodeURIComponent(qrId), { method: "POST", timeout: 45000 });
+    var st = d.status || "";
+    if (st === "waiting") {
+      say("qrMsg", "等手机扫码…", true);
+    } else if (st === "scanned") {
+      say("qrMsg", "已扫码，请在手机上点「确认登录」…", true);
+    } else if (st === "confirmed") {
+      again = false;
+      qrStopFlag = true;
+      qrId = "";
+      qrSetImage(false);
+      say("qrMsg", "登录成功：" + (d.account || "账号已绑定") + "，授权已保存，正在挂载…", true);
+      toast("扫码登录成功", "ok");
+      await refresh();
+      await loadLogs();
+      // 后台挂载需要几秒，过一会儿再刷新两次状态，别让用户以为卡住了
+      setTimeout(function () { if (!document.hidden) refresh(); }, 3000);
+      setTimeout(function () { if (!document.hidden) refresh(); }, 9000);
+    } else if (st === "expired") {
+      again = false;
+      qrSetImage(false);
+      qrHalt(d.message || "二维码已过期，请重新生成");
+    } else if (st === "cancelled") {
+      again = false;
+      qrSetImage(false);
+      qrHalt(d.message || "手机上取消了登录，请重新生成");
+    } else {
+      again = false;
+      qrHalt(d.message || "登录未完成，请重新生成二维码");
+    }
+  } catch (e) {
+    say("qrMsg", "状态查询失败：" + e.message, false);
+  }
+  if (again && !qrStopFlag) qrTimer = setTimeout(qrPoll, 2000);
+}
+
+$("btnQrStart").onclick = function () { qrStart(); };
+$("btnQrStop").onclick = function () { qrHalt("已停止，重新生成可以再来一次"); qrSetImage(false); };
 
 /* ---------------- 授权 ---------------- */
 (function () {

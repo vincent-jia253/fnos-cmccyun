@@ -68,7 +68,10 @@ type Service struct {
 	accts  map[string]*acct
 	logs   *Ring
 	logger *log.Logger
-	// 留在服务端，不落盘。
+	// 扫码登录的会话表（见 qr.go）：浏览器只拿到随机 id，含 skey 的 handle
+	// 留在服务端内存里，进程重启就失效；seq 只用来生成不重号的 id。
+	qrMu  sync.Mutex
+	qr    map[string]*qrSession
 	qrSeq uint64
 }
 
